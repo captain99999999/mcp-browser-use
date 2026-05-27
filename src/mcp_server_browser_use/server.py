@@ -78,6 +78,53 @@ logger.setLevel(getattr(logging, settings.server.logging_level.upper()))
 
 # Global registry of running asyncio tasks for cancellation support
 _running_tasks: dict[str, asyncio.Task] = {}
+# Cooperative pause controls for pausable task types.
+_pause_events: dict[str, asyncio.Event] = {}
+
+
+def _iter_running_task_ids() -> list[str]:
+    """Return active task IDs excluding internal background wrappers."""
+    return [task_id for task_id in _running_tasks if not task_id.endswith("_bg")]
+
+
+def _match_running_task_id(task_id: str) -> str | None:
+    """Resolve a full running task ID from exact or prefix input."""
+    for full_id in _iter_running_task_ids():
+        if full_id == task_id or full_id.startswith(task_id):
+            return full_id
+    return None
+
+
+def _ensure_pause_event(task_id: str) -> asyncio.Event:
+    """Create or get a cooperative pause event for a task."""
+    event = _pause_events.get(task_id)
+    if event is None:
+        event = asyncio.Event()
+        event.set()
+        _pause_events[task_id] = event
+    return event
+
+
+def _clear_pause_event(task_id: str) -> None:
+    """Remove pause control state after task exits."""
+    _pause_events.pop(task_id, None)
+
+
+async def _wait_if_paused(task_id: str, task_store, message: str = "Paused by user") -> None:
+    """Block cooperative execution while task is paused."""
+    pause_event = _pause_events.get(task_id)
+    if not pause_event or pause_event.is_set():
+        return
+
+    await task_store.update_status(task_id, TaskStatus.PAUSED)
+    while True:
+        pause_event = _pause_events.get(task_id)
+        if not pause_event or pause_event.is_set():
+            break
+        await asyncio.sleep(0.2)
+
+    await task_store.update_status(task_id, TaskStatus.RUNNING)
+    await task_store.update_progress(task_id, 0, 0, message, TaskStage.NAVIGATING)
 
 
 def serve() -> FastMCP:
@@ -325,6 +372,7 @@ def serve() -> FastMCP:
             step_num: int,
         ) -> None:
             nonlocal last_url, last_db_update
+            await _wait_if_paused(task_id, task_store)
             url_changed = state.url != last_url
             if url_changed:
                 await ctx.info(f"→ {state.title or state.url}")
@@ -367,6 +415,7 @@ def serve() -> FastMCP:
                 logger.info("SkillRecorder attached via CDP for network capture")
 
             # Register task for cancellation support
+            _ensure_pause_event(task_id)
             agent_task = asyncio.create_task(agent.run())
             _running_tasks[task_id] = agent_task
             try:
@@ -499,6 +548,7 @@ def serve() -> FastMCP:
                 except Exception as cleanup_error:
                     # Log exception but don't mask the original error
                     logger.exception(f"Critical: Failed to detach CDP listeners in finally block: {cleanup_error}")
+            _clear_pause_event(task_id)
 
     @server.tool(task=TaskConfig(mode="optional"))
     async def run_deep_research(
@@ -723,7 +773,7 @@ def serve() -> FastMCP:
             try:
                 status = TaskStatus(status_filter)
             except ValueError:
-                return f"Error: Invalid status '{status_filter}'. Use: running, completed, failed, pending"
+                return f"Error: Invalid status '{status_filter}'. Use: running, paused, completed, failed, pending"
 
         tasks = await task_store.get_task_history(limit=limit, status=status)
 
@@ -737,6 +787,12 @@ def serve() -> FastMCP:
                         "progress": f"{t.progress_current}/{t.progress_total}",
                         "created": t.created_at.isoformat(),
                         "duration_sec": round(t.duration_seconds, 1) if t.duration_seconds else None,
+                        "handover": {
+                            "operator": t.last_operator,
+                            "action": t.handover_action,
+                            "note": t.handover_note,
+                            "at": t.handover_at.isoformat() if t.handover_at else None,
+                        },
                     }
                     for t in tasks
                 ],
@@ -783,6 +839,12 @@ def serve() -> FastMCP:
                     "duration_sec": round(task.duration_seconds, 1) if task.duration_seconds else None,
                 },
                 "input": task.input_params,
+                "handover": {
+                    "operator": task.last_operator,
+                    "action": task.handover_action,
+                    "note": task.handover_note,
+                    "at": task.handover_at.isoformat() if task.handover_at else None,
+                },
                 "result": task.result[:500] if task.result else None,
                 "error": task.error,
             },
@@ -829,6 +891,77 @@ def serve() -> FastMCP:
         """
         return await _task_get_impl(task_id)
 
+    async def _task_cancel_impl(task_id: str) -> str:
+        """Implementation of task cancellation."""
+        import json
+
+        task_store = get_task_store()
+
+        # Find by prefix match
+        matched_id = _match_running_task_id(task_id)
+
+        if not matched_id:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+
+        # Cancel the asyncio task
+        task = _running_tasks[matched_id]
+        task.cancel()
+
+        # Update status in store
+        await task_store.update_status(matched_id, TaskStatus.CANCELLED, error="Cancelled by user")
+        _clear_pause_event(matched_id)
+
+        return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task cancelled"})
+
+    async def _task_pause_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
+        """Implementation of cooperative task pause."""
+        import json
+
+        task_store = get_task_store()
+        matched_id = _match_running_task_id(task_id)
+        if not matched_id:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+
+        task = await task_store.get_task(matched_id)
+        if not task:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found"})
+
+        # Deep research has no cooperative step callback yet.
+        if task.tool_name == "run_deep_research":
+            return json.dumps({"success": False, "error": "Task type does not support pause/resume yet"})
+
+        pause_event = _ensure_pause_event(matched_id)
+        if not pause_event.is_set():
+            return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task already paused"})
+
+        pause_event.clear()
+        await task_store.update_status(matched_id, TaskStatus.PAUSED)
+        actor = (operator or "human").strip() or "human"
+        await task_store.update_handover(matched_id, operator=actor, action="pause", note=note)
+        return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task pause requested by {actor}"})
+
+    async def _task_resume_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
+        """Implementation of cooperative task resume."""
+        import json
+
+        task_store = get_task_store()
+        matched_id = _match_running_task_id(task_id)
+        if not matched_id:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+
+        pause_event = _pause_events.get(matched_id)
+        if not pause_event:
+            return json.dumps({"success": False, "error": "Task does not support pause/resume"})
+
+        if pause_event.is_set():
+            return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task already running"})
+
+        pause_event.set()
+        await task_store.update_status(matched_id, TaskStatus.RUNNING)
+        actor = (operator or "human").strip() or "human"
+        await task_store.update_handover(matched_id, operator=actor, action="resume", note=note)
+        return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task resumed by {actor}"})
+
     @server.tool()
     async def task_cancel(task_id: str) -> str:
         """
@@ -840,28 +973,33 @@ def serve() -> FastMCP:
         Returns:
             JSON with success status and message
         """
-        import json
+        return await _task_cancel_impl(task_id)
 
-        task_store = get_task_store()
+    @server.tool()
+    async def task_pause(task_id: str) -> str:
+        """
+        Pause a running browser task at the next safe checkpoint.
 
-        # Find by prefix match
-        matched_id = None
-        for full_id in _running_tasks:
-            if full_id.startswith(task_id) or full_id == task_id:
-                matched_id = full_id
-                break
+        Args:
+            task_id: Task ID (full or prefix match)
 
-        if not matched_id:
-            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+        Returns:
+            JSON with success status and message
+        """
+        return await _task_pause_impl(task_id)
 
-        # Cancel the asyncio task
-        task = _running_tasks[matched_id]
-        task.cancel()
+    @server.tool()
+    async def task_resume(task_id: str) -> str:
+        """
+        Resume a paused browser task.
 
-        # Update status in store
-        await task_store.update_status(matched_id, TaskStatus.CANCELLED, error="Cancelled by user")
+        Args:
+            task_id: Task ID (full or prefix match)
 
-        return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task cancelled"})
+        Returns:
+            JSON with success status and message
+        """
+        return await _task_resume_impl(task_id)
 
     # --- Web Viewer UI ---
     @server.custom_route(path="/", methods=["GET"])
@@ -940,6 +1078,38 @@ def serve() -> FastMCP:
             return JSONResponse({"error": result}, status_code=404)
 
         return JSONResponse(json.loads(result))
+
+    @server.custom_route(path="/api/tasks/{task_id}/pause", methods=["POST"])
+    async def api_task_pause(request):
+        """REST endpoint to pause a running task."""
+        import json
+
+        from starlette.responses import JSONResponse
+
+        task_id = request.path_params["task_id"]
+        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        operator = payload.get("operator") if isinstance(payload, dict) else None
+        note = payload.get("note") if isinstance(payload, dict) else None
+        result = await _task_pause_impl(task_id, operator=operator, note=note)
+        data = json.loads(result)
+        status_code = 200 if data.get("success") else 409
+        return JSONResponse(data, status_code=status_code)
+
+    @server.custom_route(path="/api/tasks/{task_id}/resume", methods=["POST"])
+    async def api_task_resume(request):
+        """REST endpoint to resume a paused task."""
+        import json
+
+        from starlette.responses import JSONResponse
+
+        task_id = request.path_params["task_id"]
+        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        operator = payload.get("operator") if isinstance(payload, dict) else None
+        note = payload.get("note") if isinstance(payload, dict) else None
+        result = await _task_resume_impl(task_id, operator=operator, note=note)
+        data = json.loads(result)
+        status_code = 200 if data.get("success") else 409
+        return JSONResponse(data, status_code=status_code)
 
     # REST API endpoints for skills
     def _get_skill_store() -> SkillStore | None:
@@ -1101,9 +1271,11 @@ def serve() -> FastMCP:
                     llm=llm,
                     browser_profile=profile,
                     max_steps=settings.agent.max_steps,
+                    register_new_step_callback=lambda state, output, step_num: _wait_if_paused(task_id, task_store),
                 )
 
                 # Register for cancellation
+                _ensure_pause_event(task_id)
                 agent_task = asyncio.create_task(agent.run())
                 _running_tasks[task_id] = agent_task
 
@@ -1130,6 +1302,7 @@ def serve() -> FastMCP:
 
             finally:
                 clear_task_context()
+                _clear_pause_event(task_id)
 
         # Start background task and keep reference to prevent garbage collection
         bg_task = asyncio.create_task(execute_skill())
@@ -1220,6 +1393,7 @@ def serve() -> FastMCP:
                     llm=llm,
                     browser_profile=profile,
                     max_steps=settings.agent.max_steps,
+                    register_new_step_callback=lambda state, output, step_num: _wait_if_paused(task_id, task_store),
                 )
 
                 # Attach recorder to CDP
@@ -1228,6 +1402,7 @@ def serve() -> FastMCP:
                 recorder_attached = True
 
                 # Register for cancellation
+                _ensure_pause_event(task_id)
                 agent_task = asyncio.create_task(agent.run())
                 _running_tasks[task_id] = agent_task
 
@@ -1278,6 +1453,7 @@ def serve() -> FastMCP:
 
             finally:
                 clear_task_context()
+                _clear_pause_event(task_id)
 
         # Start background task and keep reference to prevent garbage collection
         bg_task = asyncio.create_task(execute_learn())

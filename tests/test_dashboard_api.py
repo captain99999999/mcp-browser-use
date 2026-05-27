@@ -129,7 +129,7 @@ class TestTaskListEndpoint:
         assert response.status_code == 200
         assert "tasks" in response.json()
 
-    @pytest.mark.parametrize("status", ["running", "completed", "failed", "pending"])
+    @pytest.mark.parametrize("status", ["running", "paused", "completed", "failed", "pending"])
     def test_task_list_all_valid_statuses(self, client, status):
         """Should accept all valid status values."""
         response = client.get(f"/api/tasks?status={status}")
@@ -144,6 +144,40 @@ class TestTaskGetEndpoint:
         """Should return 404 for non-existent task."""
         response = client.get("/api/tasks/nonexistent")
         assert response.status_code == 404
+
+
+class TestTaskPauseResumeEndpoint:
+    """Test /api/tasks/{task_id}/pause and /resume endpoints."""
+
+    def test_task_pause_not_running(self, client):
+        """Should return conflict when task is not running."""
+        response = client.post("/api/tasks/nonexistent/pause")
+        assert response.status_code == 409
+
+    def test_task_pause_accepts_handover_payload(self, client):
+        """Should accept JSON payload with operator/note even if task does not exist."""
+        response = client.post(
+            "/api/tasks/nonexistent/pause",
+            json={"operator": "tester", "note": "manual takeover"},
+        )
+        assert response.status_code == 409
+        data = response.json()
+        assert data["success"] is False
+
+    def test_task_resume_not_running(self, client):
+        """Should return conflict when task is not running."""
+        response = client.post("/api/tasks/nonexistent/resume")
+        assert response.status_code == 409
+
+    def test_task_resume_accepts_handover_payload(self, client):
+        """Should accept JSON payload with operator/note even if task does not exist."""
+        response = client.post(
+            "/api/tasks/nonexistent/resume",
+            json={"operator": "tester", "note": "takeover complete"},
+        )
+        assert response.status_code == 409
+        data = response.json()
+        assert data["success"] is False
 
 
 class TestDashboardHtmlEndpoint:
