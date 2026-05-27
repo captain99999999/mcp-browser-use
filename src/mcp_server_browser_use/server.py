@@ -110,6 +110,24 @@ def _clear_pause_event(task_id: str) -> None:
     _pause_events.pop(task_id, None)
 
 
+def _normalize_operator(operator: str | None) -> str:
+    """Normalize operator name from UI/API input."""
+    value = (operator or "").strip()
+    return value[:120] if value else "human"
+
+
+def _handover_lock_owner(task, actor: str) -> str | None:
+    """Return lock owner if task is paused by another operator."""
+    if task.status != TaskStatus.PAUSED:
+        return None
+    if task.handover_action != "pause":
+        return None
+    owner = (task.last_operator or "").strip()
+    if not owner:
+        return None
+    return owner if owner != actor else None
+
+
 async def _wait_if_paused(task_id: str, task_store, message: str = "Paused by user") -> None:
     """Block cooperative execution while task is paused."""
     pause_event = _pause_events.get(task_id)
@@ -891,11 +909,12 @@ def serve() -> FastMCP:
         """
         return await _task_get_impl(task_id)
 
-    async def _task_cancel_impl(task_id: str) -> str:
+    async def _task_cancel_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """Implementation of task cancellation."""
         import json
 
         task_store = get_task_store()
+        actor = _normalize_operator(operator)
 
         # Find by prefix match
         matched_id = _match_running_task_id(task_id)
@@ -903,15 +922,28 @@ def serve() -> FastMCP:
         if not matched_id:
             return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
 
+        db_task = await task_store.get_task(matched_id)
+        if db_task:
+            owner = _handover_lock_owner(db_task, actor)
+            if owner:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "code": "handover_locked",
+                        "error": f"Task is under manual takeover by '{owner}'. Only lock owner can cancel.",
+                    }
+                )
+
         # Cancel the asyncio task
         task = _running_tasks[matched_id]
         task.cancel()
 
         # Update status in store
-        await task_store.update_status(matched_id, TaskStatus.CANCELLED, error="Cancelled by user")
+        await task_store.update_status(matched_id, TaskStatus.CANCELLED, error=f"Cancelled by {actor}")
+        await task_store.update_handover(matched_id, operator=actor, action="cancel", note=note)
         _clear_pause_event(matched_id)
 
-        return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task cancelled"})
+        return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task cancelled by {actor}"})
 
     async def _task_pause_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """Implementation of cooperative task pause."""
@@ -930,13 +962,23 @@ def serve() -> FastMCP:
         if task.tool_name == "run_deep_research":
             return json.dumps({"success": False, "error": "Task type does not support pause/resume yet"})
 
+        actor = _normalize_operator(operator)
+        owner = _handover_lock_owner(task, actor)
+        if owner:
+            return json.dumps(
+                {
+                    "success": False,
+                    "code": "handover_locked",
+                    "error": f"Task is under manual takeover by '{owner}'.",
+                }
+            )
+
         pause_event = _ensure_pause_event(matched_id)
         if not pause_event.is_set():
-            return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task already paused"})
+            return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task already paused by {task.last_operator or actor}"})
 
         pause_event.clear()
         await task_store.update_status(matched_id, TaskStatus.PAUSED)
-        actor = (operator or "human").strip() or "human"
         await task_store.update_handover(matched_id, operator=actor, action="pause", note=note)
         return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task pause requested by {actor}"})
 
@@ -949,6 +991,19 @@ def serve() -> FastMCP:
         if not matched_id:
             return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
 
+        actor = _normalize_operator(operator)
+        task = await task_store.get_task(matched_id)
+        if task:
+            owner = _handover_lock_owner(task, actor)
+            if owner:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "code": "handover_locked",
+                        "error": f"Task is under manual takeover by '{owner}'.",
+                    }
+                )
+
         pause_event = _pause_events.get(matched_id)
         if not pause_event:
             return json.dumps({"success": False, "error": "Task does not support pause/resume"})
@@ -958,12 +1013,11 @@ def serve() -> FastMCP:
 
         pause_event.set()
         await task_store.update_status(matched_id, TaskStatus.RUNNING)
-        actor = (operator or "human").strip() or "human"
         await task_store.update_handover(matched_id, operator=actor, action="resume", note=note)
         return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task resumed by {actor}"})
 
     @server.tool()
-    async def task_cancel(task_id: str) -> str:
+    async def task_cancel(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """
         Cancel a running browser agent or research task.
 
@@ -973,7 +1027,7 @@ def serve() -> FastMCP:
         Returns:
             JSON with success status and message
         """
-        return await _task_cancel_impl(task_id)
+        return await _task_cancel_impl(task_id, operator=operator, note=note)
 
     @server.tool()
     async def task_pause(task_id: str) -> str:
