@@ -68,6 +68,14 @@ from .research.machine import ResearchMachine
 from .skills import SkillAnalyzer, SkillExecutor, SkillRecorder, SkillRunner, SkillStore
 from .utils import save_execution_result
 
+# Web search utilities
+from mcp_server_browser_utils.search import (
+    generate_search_queries,
+    search_duckduckgo,
+    deduplicate_results,
+    SearchResult,
+)
+
 if TYPE_CHECKING:
     from browser_use.agent.views import AgentOutput
     from browser_use.browser.views import BrowserStateSummary
@@ -741,6 +749,263 @@ def serve() -> FastMCP:
             if skill_store.delete(skill_name):
                 return f"Skill '{skill_name}' deleted successfully"
             return f"Error: Skill '{skill_name}' not found"
+
+    # --- Web Tools ---
+
+    @server.tool(task=TaskConfig(mode="optional"))
+    async def web_search(
+        query: str,
+        max_results: int = 10,
+        max_queries: int = 3,
+        ctx: Context = CurrentContext(),
+        progress: Progress = Progress(),
+    ) -> str:
+        """
+        Search the web using AI-optimized queries.
+
+        Executes as a background task if client requests it, otherwise synchronous.
+        Progress updates are streamed via the MCP task protocol.
+
+        Args:
+            query: Search query or question
+            max_results: Maximum number of results to return (default 10)
+            max_queries: Number of search queries to generate (default 3)
+
+        Returns:
+            JSON array of search results with title, url, and snippet
+        """
+        import json
+
+        # --- Task Tracking Setup ---
+        task_id = str(uuid.uuid4())
+        task_store = get_task_store()
+        task_record = TaskRecord(
+            task_id=task_id,
+            tool_name="web_search",
+            status=TaskStatus.PENDING,
+            input_params={"query": query, "max_results": max_results, "max_queries": max_queries},
+        )
+        await task_store.create_task(task_record)
+        bind_task_context(task_id, "web_search")
+        task_logger = get_task_logger()
+
+        await ctx.info(f"Starting web search: {query}")
+        logger.info(f"Starting web search: {query[:100]}...")
+        task_logger.info("task_created", query_preview=query[:100])
+
+        try:
+            llm, profile = _get_llm_and_profile()
+        except LLMProviderError as e:
+            logger.error(f"LLM initialization failed: {e}")
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            clear_task_context()
+            return f"Error: {e}"
+
+        # Mark task as running
+        await task_store.update_status(task_id, TaskStatus.RUNNING)
+        await task_store.update_progress(task_id, 0, 3, "Initializing...")
+        task_logger.info("task_running")
+
+        # Step 1: Generate search queries using LLM
+        await progress.set_total(3)
+        await ctx.info("Generating optimized search queries...")
+        logger.info(f"Generating {max_queries} search queries for: {query}")
+
+        try:
+            search_queries = await generate_search_queries(query, llm, max_queries)
+        except Exception as e:
+            logger.error(f"Failed to generate search queries: {e}")
+            search_queries = [query]  # Fallback to original query
+
+        await progress.increment()
+        await ctx.info(f"Generated {len(search_queries)} search queries")
+
+        # Step 2: Execute searches
+        await task_store.update_progress(task_id, 1, 3, "Searching...")
+        all_results = []
+
+        for i, search_query in enumerate(search_queries, 1):
+            await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query[:50]}...")
+            logger.info(f"Executing search {i}/{len(search_queries)}: {search_query}")
+
+            try:
+                results = await search_duckduckgo(search_query, max_results)
+                all_results.extend(results)
+                logger.info(f"Search '{search_query[:30]}...' returned {len(results)} results")
+            except Exception as e:
+                logger.error(f"Search failed for query '{search_query[:30]}...': {e}")
+
+        await progress.increment()
+
+        # Step 3: Deduplicate and limit results
+        unique_results = deduplicate_results(all_results)[:max_results]
+        await task_store.update_progress(task_id, 2, 3, "Processing results...")
+
+        result_json = json.dumps([{"title": r.title, "url": r.url, "snippet": r.snippet} for r in unique_results], indent=2)
+
+        await ctx.info(f"Search completed: {len(unique_results)} results")
+        logger.info(f"Web search completed: {len(unique_results)} results found")
+
+        # Mark task as completed
+        await task_store.update_status(task_id, TaskStatus.COMPLETED, result=result_json[:500])
+        task_logger.info("task_completed", result_count=len(unique_results))
+        clear_task_context()
+        return result_json
+
+    except asyncio.CancelledError:
+        await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
+        task_logger.info("task_cancelled")
+        clear_task_context()
+        raise
+    except Exception as e:
+        await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+        task_logger.error("task_failed", error=str(e))
+        clear_task_context()
+        logger.error(f"Web search failed: {e}")
+        raise
+
+    @server.tool(task=TaskConfig(mode="optional"))
+    async def web_fetch(
+        url: str,
+        output_format: str = "html",
+        wait_for_selector: str | None = None,
+        ctx: Context = CurrentContext(),
+        progress: Progress = Progress(),
+    ) -> str:
+        """
+        Fetch web page content with JavaScript rendering support.
+
+        Executes as a background task if client requests it, otherwise synchronous.
+        Progress updates are streamed via the MCP task protocol.
+
+        Args:
+            url: The URL to fetch
+            output_format: Output format (html, text, or screenshot) (default: html)
+            wait_for_selector: Optional CSS selector to wait for (for dynamic content)
+
+        Returns:
+            Page content as HTML, plain text, or base64-encoded screenshot
+        """
+        import base64
+
+        # --- Task Tracking Setup ---
+        task_id = str(uuid.uuid4())
+        task_store = get_task_store()
+        task_record = TaskRecord(
+            task_id=task_id,
+            tool_name="web_fetch",
+            status=TaskStatus.PENDING,
+            input_params={"url": url, "output_format": output_format, "wait_for_selector": wait_for_selector},
+        )
+        await task_store.create_task(task_record)
+        bind_task_context(task_id, "web_fetch")
+        task_logger = get_task_logger()
+
+        await ctx.info(f"Fetching: {url}")
+        logger.info(f"Starting web fetch: {url[:100]}...")
+        task_logger.info("task_created", url=url[:100])
+
+        try:
+            llm, profile = _get_llm_and_profile()
+        except LLMProviderError as e:
+            logger.error(f"LLM initialization failed: {e}")
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            clear_task_context()
+            return f"Error: {e}"
+
+        # Mark task as running
+        await task_store.update_status(task_id, TaskStatus.RUNNING)
+        await task_store.update_progress(task_id, 0, 2, "Initializing browser...")
+        task_logger.info("task_running")
+
+        # Validate URL
+        if not url.startswith(("http://", "https://")):
+            error = f"Invalid URL: {url}"
+            logger.error(error)
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=error)
+            clear_task_context()
+            return f"Error: {error}"
+
+        # Validate output format
+        valid_formats = ["html", "text", "screenshot"]
+        if output_format not in valid_formats:
+            error = f"Invalid output_format: {output_format}. Valid formats: {', '.join(valid_formats)}"
+            logger.error(error)
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=error)
+            clear_task_context()
+            return f"Error: {error}"
+
+        # Start browser session
+        from browser_use.browser.session import BrowserSession
+
+        await task_store.update_progress(task_id, 1, 2, "Loading page...")
+
+        browser_session = BrowserSession(browser_profile=profile)
+        await browser_session.start()
+
+        try:
+            # Navigate to page
+            await ctx.info(f"Navigating to: {url[:80]}...")
+            await browser_session.goto(url)
+
+            # Wait for selector if specified
+            if wait_for_selector:
+                await ctx.info(f"Waiting for selector: {wait_for_selector}")
+                try:
+                    await browser_session.wait_for_selector(wait_for_selector, timeout=10000)
+                    logger.info(f"Selector found: {wait_for_selector}")
+                except Exception as e:
+                    logger.warning(f"Wait for selector failed: {e}")
+                    await ctx.info(f"Warning: Selector not found, proceeding: {str(e)[:50]}")
+
+            # Extract content based on format
+            await ctx.info(f"Extracting content as {output_format}...")
+            logger.info(f"Extracting content in {output_format} format")
+
+            if output_format == "html":
+                content = await browser_session.page.content()
+            elif output_format == "text":
+                content = await browser_session.page.evaluate("() => document.body.innerText")
+            elif output_format == "screenshot":
+                screenshot_bytes = await browser_session.page.screenshot(full_page=False)
+                content = f"data:image/png;base64,{base64.b64encode(screenshot_bytes).decode()}"
+            else:
+                # This should not happen due to validation above
+                raise ValueError(f"Invalid output_format: {output_format}")
+
+            # Truncate content if too long
+            MAX_CONTENT_SIZE = 100000
+            if len(content) > MAX_CONTENT_SIZE:
+                truncated_content = content[:MAX_CONTENT_SIZE]
+                truncated_content += "\n\n... (content truncated due to size limit)"
+                await ctx.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
+                logger.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
+                content = truncated_content
+
+            await progress.increment()
+            await ctx.info("Fetch completed")
+            logger.info(f"Web fetch completed: {len(content)} characters ({output_format})")
+
+            # Mark task as completed
+            await task_store.update_status(task_id, TaskStatus.COMPLETED, result=content[:500])
+            task_logger.info("task_completed", content_length=len(content), format=output_format)
+            clear_task_context()
+            return content
+
+        finally:
+            await browser_session.stop()
+
+    except asyncio.CancelledError:
+        await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
+        task_logger.info("task_cancelled")
+        clear_task_context()
+        raise
+    except Exception as e:
+        await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+        task_logger.error("task_failed", error=str(e))
+        clear_task_context()
+        logger.error(f"Web fetch failed: {e}")
+        raise
 
     # --- Observability Tools ---
 
