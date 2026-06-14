@@ -1,23 +1,55 @@
-import httpx, json, asyncio
+import asyncio, os
+from bs4 import BeautifulSoup
 
 async def main():
-    async with httpx.AsyncClient(proxy='http://127.0.0.1:7897', follow_redirects=True) as c:
-        r = await c.get('https://api.duckduckgo.com/', params={'q': 'python', 'format': 'json'})
-        data = r.json()
+    with open(r"D:\browser-projects\use-browser\google_dump.html", "r", encoding="utf-8") as f:
+        html = f.read()
 
-        # Check RelatedTopics structure
-        topics = data.get('RelatedTopics', [])
-        print(f"RelatedTopics: {len(topics)} items")
-        if topics:
-            t0 = topics[0]
-            print(f"First topic keys: {list(t0.keys())}")
-            print(f"First topic full: {json.dumps(t0, indent=2)[:500]}")
+    soup = BeautifulSoup(html, 'html.parser')
 
-        # Check Results
-        results = data.get('Results', [])
-        print(f"\nResults: {len(results)} items")
-        if results:
-            print(f"First result keys: {list(results[0].keys())}")
-            print(f"First result: {json.dumps(results[0], indent=2)[:500]}")
+    # Find result containers by looking for h3 parents
+    h3s = soup.select("h3")
+    print(f"Total H3s: {len(h3s)}")
+
+    for i, h3 in enumerate(h3s[:5]):
+        print(f"\n=== Result {i+1} ===")
+        print(f"Title: {h3.get_text(strip=True)[:100]}")
+
+        # Find URL - look for the nearest link in parent hierarchy
+        parent = h3.parent
+        for _ in range(10):
+            if parent is None:
+                break
+            link = parent.select_one("a[href^='http']")
+            if link:
+                href = link.get('href', '')
+                # Google wraps in /url?q= redirect - extract real URL
+                if '/url?q=' in href:
+                    real_url = href.split('/url?q=')[-1].split('&')[0]
+                else:
+                    real_url = href
+                print(f"URL: {real_url[:150]}")
+                break
+            parent = parent.parent
+
+        # Find snippet
+        snippet_el = None
+        parent = h3.parent
+        for _ in range(5):
+            if parent is None:
+                break
+            # Look for div with text content
+            divs = parent.select("div")
+            for div in divs:
+                text = div.get_text(strip=True)
+                if text and len(text) > 30 and text != h3.get_text(strip=True):
+                    snippet_el = div
+                    break
+            if snippet_el:
+                break
+            parent = parent.parent
+
+        if snippet_el:
+            print(f"Snippet: {snippet_el.get_text(strip=True)[:200]}")
 
 asyncio.run(main())
