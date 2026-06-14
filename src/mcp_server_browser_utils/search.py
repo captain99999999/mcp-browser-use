@@ -129,6 +129,7 @@ async def search_duckduckgo(query: str, max_results: int = 10, timeout: float = 
             # Parse DuckDuckGo response format
             results = []
 
+            # Primary source: RelatedTopics
             if "RelatedTopics" in data:
                 for topic in data["RelatedTopics"][:max_results]:
                     first_url = topic.get("FirstURL")
@@ -142,7 +143,21 @@ async def search_duckduckgo(query: str, max_results: int = 10, timeout: float = 
                             )
                         )
 
-            # Fallback to AbstractText if available
+            # Secondary source: Results field (sometimes returned instead of RelatedTopics)
+            if "Results" in data and not results:
+                for item in data["Results"][:max_results]:
+                    url = item.get("FirstURL") or item.get("Icon", {}).get("URL", "")
+                    text = item.get("Text", "")
+                    if url and text:
+                        results.append(
+                            SearchResult(
+                                title=text.split(" - ")[0] if " - " in text else text,
+                                url=url,
+                                snippet=item.get("Result", "") or text,
+                            )
+                        )
+
+            # Fallback to AbstractText if no structured results
             if not results and "AbstractText" in data:
                 abstract = data.get("AbstractText", "")
                 abstract_url = data.get("AbstractURL", "")
