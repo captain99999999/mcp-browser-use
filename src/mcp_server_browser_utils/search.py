@@ -121,7 +121,9 @@ async def search_duckduckgo(query: str, max_results: int = 10, timeout: float = 
                 DUCKDUCKGO_API_URL,
                 params={"q": query, "format": "json"},
             )
-            response.raise_for_status()
+            # DuckDuckGo returns 202 for some queries (still contains valid data)
+            if response.status_code not in (200, 202):
+                response.raise_for_status()
             data = response.json()
 
             # Parse DuckDuckGo response format
