@@ -761,10 +761,10 @@ def serve() -> FastMCP:
         progress: Progress = Progress(),
     ) -> str:
         """
-        Search the web using AI-optimized queries.
+        Search the web using Google and browser-based HTML parsing.
 
-        Executes as a background task if client requests it, otherwise synchronous.
-        Progress updates are streamed via the MCP task protocol.
+        Uses LLM to generate optimized search queries, then navigates Google
+        search results pages via browser to extract titles, URLs, and snippets.
 
         Args:
             query: Search query or question
@@ -775,6 +775,8 @@ def serve() -> FastMCP:
             JSON array of search results with title, url, and snippet
         """
         import json
+        from bs4 import BeautifulSoup
+        from urllib.parse import quote_plus
 
         # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
@@ -803,12 +805,12 @@ def serve() -> FastMCP:
 
         # Mark task as running
         await task_store.update_status(task_id, TaskStatus.RUNNING)
-        await task_store.update_progress(task_id, 0, 3, "Initializing...")
         task_logger.info("task_running")
 
         try:
             # Step 1: Generate search queries using LLM
-            await progress.set_total(3)
+            total_steps = max_queries + 2
+            await progress.set_total(total_steps)
             await ctx.info("Generating optimized search queries...")
             logger.info(f"Generating {max_queries} search queries for: {query}")
 
@@ -821,36 +823,92 @@ def serve() -> FastMCP:
             await progress.increment()
             await ctx.info(f"Generated {len(search_queries)} search queries")
 
-            # Step 2: Execute searches
-            await task_store.update_progress(task_id, 1, 3, "Searching...")
+            # Step 2: Open a browser session for all searches
+            from browser_use.browser.session import BrowserSession
+
+            await task_store.update_progress(task_id, 1, total_steps, "Opening browser...")
+            browser_session = BrowserSession(browser_profile=profile)
+            await browser_session.start()
+
             all_results = []
 
-            for i, search_query in enumerate(search_queries, 1):
-                await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query[:50]}...")
-                logger.info(f"Executing search {i}/{len(search_queries)}: {search_query}")
+            try:
+                for i, search_query in enumerate(search_queries, 1):
+                    await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query}")
+                    logger.info(f"Executing Google search {i}/{len(search_queries)}: {search_query}")
 
-                try:
-                    results = await search_duckduckgo(search_query, max_results)
-                    all_results.extend(results)
-                    logger.info(f"Search '{search_query[:30]}...' returned {len(results)} results")
-                except Exception as e:
-                    logger.error(f"Search failed for query '{search_query[:30]}...': {e}")
+                    try:
+                        # Navigate to Google search
+                        google_url = f"https://www.google.com/search?q={quote_plus(search_query)}&hl=en"
+                        await browser_session.navigate_to(google_url)
+                        import asyncio as _asyncio
+                        await _asyncio.sleep(1.5)
 
-            await progress.increment()
+                        # Get page content
+                        page = await browser_session.get_current_page()
+                        html = await page.evaluate("() => document.documentElement.outerHTML")
 
-            # Step 3: Deduplicate and limit results
-            unique_results = deduplicate_results(all_results)[:max_results]
-            await task_store.update_progress(task_id, 2, 3, "Processing results...")
+                        # Parse results with BeautifulSoup
+                        soup = BeautifulSoup(html, "html.parser")
+                        result_count = 0
 
-            result_json = json.dumps([{"title": r.title, "url": r.url, "snippet": r.snippet} for r in unique_results], indent=2)
+                        # Modern Google HTML selectors (2024+)
+                        for g in soup.select("div.g, div[data-sokoban-container]"):
+                            if len(all_results) >= max_results:
+                                break
 
-            await ctx.info(f"Search completed: {len(unique_results)} results")
-            logger.info(f"Web search completed: {len(unique_results)} results found")
+                            # Extract title
+                            title_el = g.select_one("h3")
+                            if not title_el:
+                                continue
+                            title = title_el.get_text(strip=True)
 
-            await task_store.update_status(task_id, TaskStatus.COMPLETED, result=result_json[:500])
-            task_logger.info("task_completed", result_count=len(unique_results))
-            clear_task_context()
-            return result_json
+                            # Extract URL
+                            link_el = g.select_one("a[href^='http']")
+                            url = ""
+                            if link_el:
+                                url = link_el.get("href", "")
+                                # Convert relative URLs
+                                if url.startswith("/"):
+                                    url = f"https://www.google.com{url}"
+
+                            # Extract snippet
+                            snippet_el = g.select_one(".VwiC3b, span.aCOpRe, div[data-sncf]")
+                            if not snippet_el:
+                                snippet_el = g.select_one("div[style*='-webkit-line-clamp']")
+                            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+
+                            if title and url:
+                                all_results.append(SearchResult(title=title[:200], url=url, snippet=snippet[:500]))
+                                result_count += 1
+
+                        logger.info(f"Search '{search_query[:30]}...' parsed {result_count} results")
+
+                    except Exception as e:
+                        logger.error(f"Search failed for query '{search_query[:30]}...': {e}")
+
+                    await progress.increment()
+
+                # Deduplicate and limit results
+                unique_results = deduplicate_results(all_results)[:max_results]
+                await task_store.update_progress(task_id, total_steps - 1, total_steps, "Done")
+
+                result_json = json.dumps(
+                    [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in unique_results],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+                await ctx.info(f"Search completed: {len(unique_results)} results")
+                logger.info(f"Web search completed: {len(unique_results)} results found")
+
+                await task_store.update_status(task_id, TaskStatus.COMPLETED, result=result_json[:500])
+                task_logger.info("task_completed", result_count=len(unique_results))
+                clear_task_context()
+                return result_json
+
+            finally:
+                await browser_session.stop()
 
         except asyncio.CancelledError:
             await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
