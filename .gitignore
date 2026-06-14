@@ -89,6 +89,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# 本地临时调试脚本（不入版本控制，避免污染 git status）
+test_proxy.py
+google_dump.html
 # 个人 Claude Code 配置
 .claude/
 
