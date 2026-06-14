@@ -946,29 +946,22 @@ def serve() -> FastMCP:
         try:
             # Navigate to page
             await ctx.info(f"Navigating to: {url[:80]}...")
-            await browser_session.goto(url)
+            await browser_session.navigate_to(url)
 
-            # Wait for selector if specified
-            if wait_for_selector:
-                await ctx.info(f"Waiting for selector: {wait_for_selector}")
-                try:
-                    await browser_session.wait_for_selector(wait_for_selector, timeout=10000)
-                    logger.info(f"Selector found: {wait_for_selector}")
-                except Exception as e:
-                    logger.warning(f"Wait for selector failed: {e}")
-                    await ctx.info(f"Warning: Selector not found, proceeding: {str(e)[:50]}")
+            # Wait a moment for page to render
+            import asyncio as _asyncio
+            await _asyncio.sleep(1)
 
-            # Extract content based on format
             await ctx.info(f"Extracting content as {output_format}...")
-            logger.info(f"Extracting content in {output_format} format")
 
             if output_format == "html":
-                content = await browser_session.page.content()
+                page = await browser_session.get_current_page()
+                content = await page.evaluate("() => document.documentElement.outerHTML")
             elif output_format == "text":
-                content = await browser_session.page.evaluate("() => document.body.innerText")
+                page = await browser_session.get_current_page()
+                content = await page.evaluate("() => document.body.innerText")
             elif output_format == "screenshot":
-                screenshot_bytes = await browser_session.page.screenshot(full_page=False)
-                content = f"data:image/png;base64,{base64.b64encode(screenshot_bytes).decode()}"
+                content = await browser_session.take_screenshot()
             else:
                 # This should not happen due to validation above
                 raise ValueError(f"Invalid output_format: {output_format}")
