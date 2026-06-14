@@ -806,63 +806,63 @@ def serve() -> FastMCP:
         await task_store.update_progress(task_id, 0, 3, "Initializing...")
         task_logger.info("task_running")
 
-        # Step 1: Generate search queries using LLM
-        await progress.set_total(3)
-        await ctx.info("Generating optimized search queries...")
-        logger.info(f"Generating {max_queries} search queries for: {query}")
-
         try:
-            search_queries = await generate_search_queries(query, llm, max_queries)
-        except Exception as e:
-            logger.error(f"Failed to generate search queries: {e}")
-            search_queries = [query]  # Fallback to original query
-
-        await progress.increment()
-        await ctx.info(f"Generated {len(search_queries)} search queries")
-
-        # Step 2: Execute searches
-        await task_store.update_progress(task_id, 1, 3, "Searching...")
-        all_results = []
-
-        for i, search_query in enumerate(search_queries, 1):
-            await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query[:50]}...")
-            logger.info(f"Executing search {i}/{len(search_queries)}: {search_query}")
+            # Step 1: Generate search queries using LLM
+            await progress.set_total(3)
+            await ctx.info("Generating optimized search queries...")
+            logger.info(f"Generating {max_queries} search queries for: {query}")
 
             try:
-                results = await search_duckduckgo(search_query, max_results)
-                all_results.extend(results)
-                logger.info(f"Search '{search_query[:30]}...' returned {len(results)} results")
+                search_queries = await generate_search_queries(query, llm, max_queries)
             except Exception as e:
-                logger.error(f"Search failed for query '{search_query[:30]}...': {e}")
+                logger.error(f"Failed to generate search queries: {e}")
+                search_queries = [query]
 
-        await progress.increment()
+            await progress.increment()
+            await ctx.info(f"Generated {len(search_queries)} search queries")
 
-        # Step 3: Deduplicate and limit results
-        unique_results = deduplicate_results(all_results)[:max_results]
-        await task_store.update_progress(task_id, 2, 3, "Processing results...")
+            # Step 2: Execute searches
+            await task_store.update_progress(task_id, 1, 3, "Searching...")
+            all_results = []
 
-        result_json = json.dumps([{"title": r.title, "url": r.url, "snippet": r.snippet} for r in unique_results], indent=2)
+            for i, search_query in enumerate(search_queries, 1):
+                await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query[:50]}...")
+                logger.info(f"Executing search {i}/{len(search_queries)}: {search_query}")
 
-        await ctx.info(f"Search completed: {len(unique_results)} results")
-        logger.info(f"Web search completed: {len(unique_results)} results found")
+                try:
+                    results = await search_duckduckgo(search_query, max_results)
+                    all_results.extend(results)
+                    logger.info(f"Search '{search_query[:30]}...' returned {len(results)} results")
+                except Exception as e:
+                    logger.error(f"Search failed for query '{search_query[:30]}...': {e}")
 
-        # Mark task as completed
-        await task_store.update_status(task_id, TaskStatus.COMPLETED, result=result_json[:500])
-        task_logger.info("task_completed", result_count=len(unique_results))
-        clear_task_context()
-        return result_json
+            await progress.increment()
 
-    except asyncio.CancelledError:
-        await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
-        task_logger.info("task_cancelled")
-        clear_task_context()
-        raise
-    except Exception as e:
-        await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
-        task_logger.error("task_failed", error=str(e))
-        clear_task_context()
-        logger.error(f"Web search failed: {e}")
-        raise
+            # Step 3: Deduplicate and limit results
+            unique_results = deduplicate_results(all_results)[:max_results]
+            await task_store.update_progress(task_id, 2, 3, "Processing results...")
+
+            result_json = json.dumps([{"title": r.title, "url": r.url, "snippet": r.snippet} for r in unique_results], indent=2)
+
+            await ctx.info(f"Search completed: {len(unique_results)} results")
+            logger.info(f"Web search completed: {len(unique_results)} results found")
+
+            await task_store.update_status(task_id, TaskStatus.COMPLETED, result=result_json[:500])
+            task_logger.info("task_completed", result_count=len(unique_results))
+            clear_task_context()
+            return result_json
+
+        except asyncio.CancelledError:
+            await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
+            task_logger.info("task_cancelled")
+            clear_task_context()
+            raise
+        except Exception as e:
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            task_logger.error("task_failed", error=str(e))
+            clear_task_context()
+            logger.error(f"Web search failed: {e}")
+            raise
 
     @server.tool(task=TaskConfig(mode="optional"))
     async def web_fetch(
@@ -992,20 +992,19 @@ def serve() -> FastMCP:
             clear_task_context()
             return content
 
+        except asyncio.CancelledError:
+            await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
+            task_logger.info("task_cancelled")
+            clear_task_context()
+            raise
+        except Exception as e:
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            task_logger.error("task_failed", error=str(e))
+            clear_task_context()
+            logger.error(f"Web fetch failed: {e}")
+            raise
         finally:
             await browser_session.stop()
-
-    except asyncio.CancelledError:
-        await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
-        task_logger.info("task_cancelled")
-        clear_task_context()
-        raise
-    except Exception as e:
-        await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
-        task_logger.error("task_failed", error=str(e))
-        clear_task_context()
-        logger.error(f"Web fetch failed: {e}")
-        raise
 
     # --- Observability Tools ---
 
