@@ -848,38 +848,51 @@ def serve() -> FastMCP:
                         page = await browser_session.get_current_page()
                         html = await page.evaluate("() => document.documentElement.outerHTML")
 
-                        # Parse results with BeautifulSoup
+                        # Parse results: find h3 titles, then walk up to extract URL + snippet
                         soup = BeautifulSoup(html, "html.parser")
                         result_count = 0
 
-                        # Modern Google HTML selectors (2024+)
-                        for g in soup.select("div.g, div[data-sokoban-container]"):
+                        for h3 in soup.select("h3"):
                             if len(all_results) >= max_results:
                                 break
-
-                            # Extract title
-                            title_el = g.select_one("h3")
-                            if not title_el:
+                            title = h3.get_text(strip=True)
+                            if not title:
                                 continue
-                            title = title_el.get_text(strip=True)
 
-                            # Extract URL
-                            link_el = g.select_one("a[href^='http']")
+                            # Find URL: walk up parent chain for an <a> with href
                             url = ""
-                            if link_el:
-                                url = link_el.get("href", "")
-                                # Convert relative URLs
-                                if url.startswith("/"):
-                                    url = f"https://www.google.com{url}"
+                            parent = h3.parent
+                            for _ in range(10):
+                                if parent is None:
+                                    break
+                                link = parent.select_one("a[href]")
+                                if link:
+                                    href = link.get("href", "")
+                                    if "/url?q=" in href:
+                                        url = href.split("/url?q=")[-1].split("&")[0]
+                                    elif href.startswith("http"):
+                                        url = href
+                                    if url:
+                                        break
+                                parent = parent.parent
 
-                            # Extract snippet
-                            snippet_el = g.select_one(".VwiC3b, span.aCOpRe, div[data-sncf]")
-                            if not snippet_el:
-                                snippet_el = g.select_one("div[style*='-webkit-line-clamp']")
-                            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                            # Find snippet: walk up for a div with enough text
+                            snippet = ""
+                            parent = h3.parent
+                            for _ in range(8):
+                                if parent is None:
+                                    break
+                                for div in parent.select("div"):
+                                    text = div.get_text(strip=True)
+                                    if text and len(text) > 30 and text != title:
+                                        snippet = text[:500]
+                                        break
+                                if snippet:
+                                    break
+                                parent = parent.parent
 
                             if title and url:
-                                all_results.append(SearchResult(title=title[:200], url=url, snippet=snippet[:500]))
+                                all_results.append(SearchResult(title=title[:200], url=url, snippet=snippet))
                                 result_count += 1
 
                         logger.info(f"Search '{search_query[:30]}...' parsed {result_count} results")
