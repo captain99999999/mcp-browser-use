@@ -89,6 +89,11 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# 本地测试脚本（不进入版本控制，避免硬编码密钥泄露）
+test_*.py
+*_local.py
+.claude/
+
 # Translations
 *.mo
 *.pot

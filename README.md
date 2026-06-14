@@ -20,6 +20,7 @@ MCP server that gives AI assistants the power to control a web browser.
 - [Skills System](#skills-system-super-alpha)
 - [REST API Reference](#rest-api-reference)
 - [Architecture](#architecture)
+- [Development](#development)
 - [License](#license)
 
 ---
@@ -187,7 +188,7 @@ mcp-server-browser-use config set -k agent.max_steps -v 30
 
 ### Config Priority
 
-```
+```text
 Environment Variables > Config File > Defaults
 ```
 
@@ -392,7 +393,7 @@ mcp-server-browser-use call web_fetch \
 
 Deep research executes a 3-phase workflow:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │  Phase 1: PLANNING                                       │
 │  LLM generates 3-5 focused search queries from topic     │
@@ -427,7 +428,7 @@ All tool executions are tracked in SQLite for debugging and monitoring.
 
 ### Task Lifecycle
 
-```
+```text
 PENDING ──► RUNNING ──► COMPLETED
                │
                ├──► FAILED
@@ -438,7 +439,7 @@ PENDING ──► RUNNING ──► COMPLETED
 
 During execution, tasks progress through granular stages:
 
-```
+```text
 INITIALIZING → PLANNING → NAVIGATING → EXTRACTING → SYNTHESIZING
 ```
 
@@ -450,7 +451,7 @@ INITIALIZING → PLANNING → NAVIGATING → EXTRACTING → SYNTHESIZING
 mcp-server-browser-use tasks
 ```
 
-```
+```text
 ┌──────────────┬───────────────────┬───────────┬──────────┬──────────┐
 │ ID           │ Tool              │ Status    │ Progress │ Duration │
 ├──────────────┼───────────────────┼───────────┼──────────┼──────────┤
@@ -512,7 +513,7 @@ Browser automation is slow (60-120 seconds per task). But most websites have API
 
 Skills capture the API calls made during a browser session and replay them directly via CDP (Chrome DevTools Protocol).
 
-```
+```text
 Without Skills:  Browser navigation → 60-120 seconds
 With Skills:     Direct API call    → 1-3 seconds
 ```
@@ -549,7 +550,7 @@ Every skill supports two execution paths:
 
 If the skill captured an API endpoint (`SkillRequest`):
 
-```
+```text
 Initialize CDP session
     ↓
 Navigate to domain (establish cookies)
@@ -565,7 +566,7 @@ Return data
 
 If direct execution fails or no API was found:
 
-```
+```text
 Inject navigation hints into task prompt
     ↓
 Agent uses hints as guidance
@@ -653,7 +654,7 @@ The server exposes REST endpoints for direct HTTP access. All endpoints return J
 
 ### Base URL
 
-```
+```text
 http://localhost:8383
 ```
 
@@ -837,7 +838,7 @@ Event format:
 
 ### High-Level Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           MCP CLIENTS                                    │
 │              (Claude Desktop, mcp-remote, CLI call)                      │
@@ -869,7 +870,7 @@ Event format:
 
 ### Module Structure
 
-```
+```text
 src/mcp_server_browser_use/
 ├── server.py            # FastMCP server + MCP tools
 ├── cli.py               # Typer CLI for daemon management
@@ -920,6 +921,50 @@ src/mcp_server_browser_utils/
 - AWS Bedrock
 - OpenRouter
 - Vercel AI
+
+---
+
+## Development
+
+This section links to the in-repo development guides. Read these before contributing.
+
+| Document | Purpose |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Required workflow for LLM-driven engineering agents: lint, format, type-check, test commands; coding standards; testing patterns; CI fix order |
+| [CLAUDE.md](CLAUDE.md) | Local fork notes: branch strategy (`fev` vs `main`), Handover Lock customization, upstream sync procedure |
+| [FASTMCP_PREVENTION_STRATEGIES.md](FASTMCP_PREVENTION_STRATEGIES.md) | FastMCP-specific gotchas and patterns (HTTP transport, context propagation, streaming) |
+
+### Local quick reference
+
+```bash
+# Sync deps
+uv sync
+
+# Format / lint / type-check / test
+uv run ruff format .
+uv run ruff check .
+uv run pyright
+uv run pytest
+
+# Run the server in foreground (for debugging)
+uv run mcp-server-browser-use server -f
+```
+
+### Repository layout
+
+```text
+mcp-browser-use/                 # this repo (fork of Saik0s/mcp-browser-use)
+├── src/
+│   ├── mcp_server_browser_use/  # server, tools, skills, research
+│   └── mcp_server_browser_utils/  # Google HTML parser, query generator
+├── tests/                       # pytest suite (unit + e2e markers)
+├── docs/                        # design notes
+├── AGENTS.md                    # ← dev workflow (read first)
+├── CLAUDE.md                    # ← local fork notes
+└── FASTMCP_PREVENTION_STRATEGIES.md
+```
+
+> Local scripts under `test_*.py` or `*_local.py` are untracked on purpose — never commit API keys or environment-specific paths.
 
 ---
 
