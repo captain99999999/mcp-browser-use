@@ -99,19 +99,24 @@ Return ONLY a JSON array of {max_queries} search query strings."""
         return [topic]
 
 
-async def search_duckduckgo(query: str, max_results: int = 10, timeout: float = 10.0) -> list[SearchResult]:
+async def search_duckduckgo(query: str, max_results: int = 10, timeout: float = 10.0, proxy: str | None = None) -> list[SearchResult]:
     """Search using DuckDuckGo Instant Answer API.
 
     Args:
         query: Search query string
         max_results: Maximum number of results to return
         timeout: Request timeout in seconds
+        proxy: Optional proxy URL (e.g., http://127.0.0.1:7897)
 
     Returns:
         List of SearchResult objects
     """
+    import os
+
+    proxy_url = proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("MCP_PROXY")
+
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, proxy=proxy_url, follow_redirects=True) as client:
             response = await client.get(
                 DUCKDUCKGO_API_URL,
                 params={"q": query, "format": "json"},
