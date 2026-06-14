@@ -276,12 +276,17 @@ These tools are exposed via MCP for AI clients:
 |------|-------------|------------------|
 | `run_browser_agent` | Execute browser automation tasks | 60-120s |
 | `run_deep_research` | Multi-search research with synthesis | 2-5 min |
+| `web_search` | Google search via browser + LLM query optimization | 10-30s |
+| `web_fetch` | Fetch web page content with JS rendering (HTML/text/screenshot) | 5-15s |
 | `skill_list` | List learned skills | <1s |
 | `skill_get` | Get skill definition | <1s |
 | `skill_delete` | Delete a skill | <1s |
 | `health_check` | Server status and running tasks | <1s |
 | `task_list` | Query task history | <1s |
 | `task_get` | Get full task details | <1s |
+| `task_pause` | Pause a running browser task | <1s |
+| `task_resume` | Resume a paused browser task | <1s |
+| `task_cancel` | Cancel a running task (with handover lock) | <1s |
 
 ### run_browser_agent
 
@@ -316,6 +321,70 @@ mcp-server-browser-use call run_deep_research \
 ```
 
 The agent searches multiple sources, extracts key findings, and compiles a markdown report.
+
+### web_search
+
+Search the web using Google and browser-based HTML parsing, with LLM-optimized queries.
+
+```bash
+mcp-server-browser-use call web_search \
+  query="Python asyncio tutorial" \
+  max_results=5 \
+  max_queries=1
+```
+
+**How it works:**
+1. LLM generates optimized search queries from the input topic
+2. Browser navigates to Google search results for each query
+3. BeautifulSoup4 parses titles, URLs, and snippets
+4. Results are deduplicated and returned as JSON
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | string | Search query or question (required) |
+| `max_results` | int | Maximum number of results to return (default 10) |
+| `max_queries` | int | Number of search queries to generate via LLM (default 3) |
+
+**Returns:**
+```json
+[
+  {
+    "title": "Python's asyncio: A Hands-On Walkthrough",
+    "url": "https://realpython.com/async-io-python/",
+    "snippet": "Real Python - asyncio tutorial..."
+  }
+]
+```
+
+### web_fetch
+
+Fetch web page content with full JavaScript rendering support using browser automation.
+
+```bash
+mcp-server-browser-use call web_fetch \
+  url="https://www.example.com" \
+  output_format="text"
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `url` | string | The URL to fetch (required) |
+| `output_format` | string | Output format: `html`, `text`, or `screenshot` (default: `html`) |
+
+**How it works:**
+1. Starts a browser session via BrowserSession
+2. Navigates to the target URL with JS rendering
+3. Extracts content in the requested format
+4. Returns the result (truncated at 100KB)
+
+**Output formats:**
+- `html` — Full page HTML source
+- `text` — Visible text content (document.body.innerText)
+- `screenshot` — Base64-encoded PNG screenshot
 
 ---
 
@@ -411,6 +480,9 @@ AI clients can query task status directly:
 - `health_check` - Server status + list of running tasks
 - `task_list` - Recent tasks with optional status filter
 - `task_get` - Full details of a specific task
+- `task_pause` - Pause a running task at next checkpoint
+- `task_resume` - Resume a paused task
+- `task_cancel` - Cancel a running task (with handover lock)
 
 ### Storage
 
@@ -777,7 +849,8 @@ Event format:
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │                      MCP TOOLS                                    │   │
 │  │  • run_browser_agent    • skill_list/get/delete                  │   │
-│  │  • run_deep_research    • health_check/task_list/task_get        │   │
+│  │  • run_deep_research    • web_search / web_fetch                 │   │
+│  │  • health_check         • task_list/get/pause/resume/cancel      │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 └────────┬──────────────┬─────────────────┬────────────────┬──────────────┘
          │              │                 │                │
@@ -819,6 +892,9 @@ src/mcp_server_browser_use/
 └── research/            # Deep research workflow
     ├── models.py        # SearchResult, ResearchSource
     └── machine.py       # Plan → Search → Synthesize
+
+src/mcp_server_browser_utils/
+└── search.py            # Web search utilities (Google parsing, query generation)
 ```
 
 ### File Locations
