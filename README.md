@@ -4,6 +4,8 @@ MCP server that gives AI assistants the power to control a web browser.
 
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
+> **Note**: This is an **internal fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use). The fork is hosted at [`github.com/captain99999999/mcp-browser-use`](https://github.com/captain99999999/mcp-browser-use) and is the **only** push target. For fork-specific changes (Handover Lock, `web_search` / `web_fetch`, deployment), see [CLAUDE.md](CLAUDE.md).
+
 ---
 
 ## Table of Contents
@@ -26,6 +28,8 @@ MCP server that gives AI assistants the power to control a web browser.
 ---
 
 ## What is this?
+
+**Origin**: forked from [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use) for internal customization. All development happens on the `fev` branch of the fork; see [CLAUDE.md](CLAUDE.md) for the workflow.
 
 This wraps [browser-use](https://github.com/browser-use/browser-use) as an MCP server, letting Claude (or any MCP client) automate a real browser—navigate pages, fill forms, click buttons, extract data, and more.
 
@@ -69,7 +73,7 @@ For other MCP clients or standalone use:
 
 ```bash
 # Clone and install
-git clone https://github.com/Saik0s/mcp-browser-use.git
+git clone https://github.com/captain99999999/mcp-browser-use.git
 cd mcp-server-browser-use
 uv sync
 

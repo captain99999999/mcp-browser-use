@@ -4,6 +4,10 @@
 
 MCP server that wraps [browser-use](https://github.com/browser-use/browser-use) for AI-driven browser automation. HTTP-only transport (stdio deprecated due to timeout issues with long-running browser tasks).
 
+> **Note**: This repository is a **fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use).
+> The fork lives at `github.com/captain99999999/mcp-browser-use` and is the **only** push target.
+> For fork-specific guidance (Handover Lock, custom tools, deployment) see [CLAUDE.md](CLAUDE.md).
+
 ## Required Development Workflow
 
 **CRITICAL**: Always run these commands before committing:
@@ -26,7 +30,9 @@ uv run pytest              # Run tests
 | `├─ server.py` | FastMCP server + MCP tools |
 | `├─ cli.py` | Typer CLI for daemon management |
 | `├─ config.py` | Pydantic settings |
-| `├─ providers.py` | LLM factory (12 providers) |
+| `src/mcp_server_browser_utils/` | Web search utilities (Google HTML parser, query generator) — **fork-specific** |
+| `tests/` | Pytest test suite |
+| `├─ integration_tests/` | End-to-end integration tests (real LLM + real browser)ory (12 providers) |
 | `├─ observability/` | Task tracking (SQLite persistence) |
 | `├─ research/` | Deep research workflow |
 | `└─ skills/` | Machine-learned browser skills |
