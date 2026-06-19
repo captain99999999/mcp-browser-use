@@ -158,14 +158,35 @@ class BrowserSettings(BaseSettings):
     proxy_server: str | None = Field(default=None, description="Proxy server URL (e.g., http://host:8080)")
     proxy_bypass: str | None = Field(default=None, description="Comma-separated hosts to bypass proxy")
     cdp_url: str | None = Field(default=None, description="CDP URL for external browser (e.g., http://localhost:9222)")
+    cdp_urls: list[str] = Field(
+        default_factory=list,
+        description='List of CDP URLs for browser pool (e.g., ["http://127.0.0.1:9222", "http://127.0.0.1:9226"]) - will override cdp_url if set',
+    )
     user_data_dir: str | None = Field(default=None, description="Path to Chrome user data directory for persistent profile")
     chromium_sandbox: bool = Field(default=True)
+
+    def get_cdps_url_or_urls(self) -> str | list[str]:
+        """Get CDP URL(s) with support for multi-instance mode.
+
+        Returns:
+            Single URL as string or list of URLs for browser pool.
+        """
+        if self.cdp_urls:
+            return self.cdp_urls
+        elif self.cdp_url:
+            return [self.cdp_url]
+        else:
+            return []
 
     @model_validator(mode="after")
     def validate_cdp_url(self) -> "BrowserSettings":
         """Ensure CDP URL is localhost-only for security."""
-        if self.cdp_url:
-            parsed = urlparse(self.cdp_url)
+        urls = [self.cdp_url] if self.cdp_url else []
+        if self.cdp_urls:
+            urls.extend(self.cdp_urls)
+
+        for url in urls:
+            parsed = urlparse(url)
             if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
                 raise ValueError("CDP URL must be localhost for security")
         return self
@@ -194,6 +215,10 @@ class ServerSettings(BaseSettings):
     port: int = Field(default=8383, description="Port for HTTP transports")
     results_dir: str | None = Field(default=None, description="Directory to save execution results")
     auth_token: SecretStr | None = Field(default=None, description="Bearer token for non-localhost access")
+    max_concurrent_tasks: int = Field(default=10, description="Maximum number of concurrent browser tasks")
+    max_queued_tasks: int = Field(default=100, description="Maximum number of queued tasks")
+    alert_max_running_tasks: int = Field(default=5, description="Alert if running tasks exceed this threshold")
+    alert_failure_rate: float = Field(default=0.5, description="Alert if failure rate exceeds this threshold (0-1)")
 
 
 class ResearchSettings(BaseSettings):
@@ -204,6 +229,16 @@ class ResearchSettings(BaseSettings):
     max_searches: int = Field(default=5, description="Maximum number of searches per research task")
     save_directory: str | None = Field(default=None, description="Directory to save research reports")
     search_timeout: int = Field(default=120, description="Timeout per search in seconds")
+
+
+class ToolsSettings(BaseSettings):
+    """Tool-specific configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="MCP_TOOLS_")
+
+    web_fetch_timeout: int = Field(default=60, description="Timeout for web_fetch in seconds")
+    web_search_timeout: int = Field(default=120, description="Timeout for web_search in seconds")
+    search_timeout: int = Field(default=30, description="Timeout for API search in seconds")
 
 
 class SkillsSettings(BaseSettings):
@@ -230,6 +265,7 @@ class AppSettings(BaseSettings):
     server: ServerSettings = Field(default_factory=ServerSettings)
     research: ResearchSettings = Field(default_factory=ResearchSettings)
     skills: SkillsSettings = Field(default_factory=SkillsSettings)
+    tools: ToolsSettings = Field(default_factory=ToolsSettings)
 
     def save(self) -> Path:
         """Save current configuration to file (excluding secrets)."""

@@ -51,6 +51,28 @@ def _configure_stdio_logging() -> None:
 # Configure logging BEFORE importing browser_use and other noisy dependencies
 _configure_stdio_logging()
 
+# --- Web Tools Concurrency & Pool Control (t3/t4/t5) ---
+# Only applies to web_search and web_fetch tools
+# Initialized later in serve() after settings are loaded
+_web_tools_semaphore: asyncio.Semaphore | None = None
+_browser_pool_index = 0
+
+
+def _get_browser_pool_url() -> str | None:
+    """Get next CDP URL from pool using round-robin.
+
+    Returns:
+        Next CDP URL or None if no URLs configured.
+    """
+    global _browser_pool_index
+    urls = settings.browser.get_cdps_url_or_urls()
+    if not urls:
+        return None
+    url = urls[_browser_pool_index % len(urls)]
+    _browser_pool_index += 1
+    return url
+
+
 # ruff: noqa: E402 - Intentional late imports after logging configuration
 from browser_use import Agent, BrowserProfile
 from browser_use.browser.profile import ProxySettings
@@ -160,6 +182,10 @@ def serve() -> FastMCP:
 
     server = FastMCP("mcp_server_browser_use")
 
+    # Initialize web tools semaphore (t5: concurrency control for web_search/web_fetch)
+    global _web_tools_semaphore
+    _web_tools_semaphore = asyncio.Semaphore(min(settings.server.max_concurrent_tasks, 5))
+
     # Initialize skill components (only when skills feature is enabled)
     skill_store: SkillStore | None = None
     skill_executor: SkillExecutor | None = None
@@ -190,6 +216,38 @@ def serve() -> FastMCP:
         )
         if settings.browser.cdp_url:
             logger.info(f"Using external browser via CDP: {settings.browser.cdp_url}")
+        return llm, profile
+
+    def _get_llm_and_profile_for_web_tools():
+        """t3: Helper with browser pool support for web_search/web_fetch."""
+        if _web_tools_semaphore is None:
+            raise RuntimeError("Web tools not initialized")
+
+        llm = get_llm(
+            provider=settings.llm.provider,
+            model=settings.llm.model_name,
+            api_key=settings.llm.get_api_key_for_provider(),
+            base_url=settings.llm.base_url,
+            azure_endpoint=settings.llm.azure_endpoint,
+            azure_api_version=settings.llm.azure_api_version,
+            aws_region=settings.llm.aws_region,
+        )
+        proxy = None
+        if settings.browser.proxy_server:
+            proxy = ProxySettings(server=settings.browser.proxy_server, bypass=settings.browser.proxy_bypass)
+
+        # t3: Get next browser URL from pool
+        cdp_url = _get_browser_pool_url() or settings.browser.cdp_url
+
+        profile = BrowserProfile(
+            headless=settings.browser.headless,
+            proxy=proxy,
+            cdp_url=cdp_url,
+            user_data_dir=settings.browser.user_data_dir,
+            chromium_sandbox=settings.browser.chromium_sandbox,
+        )
+        if cdp_url:
+            logger.info(f"Using browser pool CDP: {cdp_url}")
         return llm, profile
 
     @server.tool(task=TaskConfig(mode="optional"))
@@ -766,6 +824,8 @@ def serve() -> FastMCP:
         Uses LLM to generate optimized search queries, then navigates Google
         search results pages via browser to extract titles, URLs, and snippets.
 
+        t3/t4/t5: Applies browser pool round-robin, timeout control, and concurrency limit.
+
         Args:
             query: Search query or question
             max_results: Maximum number of results to return (default 10)
@@ -774,9 +834,11 @@ def serve() -> FastMCP:
         Returns:
             JSON array of search results with title, url, and snippet
         """
-        import json
-        from bs4 import BeautifulSoup
-        from urllib.parse import quote_plus
+        # t5: Concurrency control for web_search
+        async with _web_tools_semaphore:
+            import json
+            from bs4 import BeautifulSoup
+            from urllib.parse import quote_plus
 
         # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
@@ -838,15 +900,15 @@ def serve() -> FastMCP:
                     logger.info(f"Executing Google search {i}/{len(search_queries)}: {search_query}")
 
                     try:
-                        # Navigate to Google search
+                        # t3: t4: Navigate with timeout
                         google_url = f"https://www.google.com/search?q={quote_plus(search_query)}&hl=en"
-                        await browser_session.navigate_to(google_url)
-                        import asyncio as _asyncio
-                        await _asyncio.sleep(1.5)
+                        timeout_seconds = settings.tools.web_search_timeout / max_queries
+                        await asyncio.wait_for(browser_session.navigate_to(google_url), timeout=timeout_seconds)
+                        await asyncio.wait_for(asyncio.sleep(1.5), timeout=5)
 
-                        # Get page content
+                        # t4: Get page content with timeout
                         page = await browser_session.get_current_page()
-                        html = await page.evaluate("() => document.documentElement.outerHTML")
+                        html = await asyncio.wait_for(page.evaluate("() => document.documentElement.outerHTML"), timeout=timeout_seconds)
 
                         # Parse results: find h3 titles, then walk up to extract URL + snippet
                         soup = BeautifulSoup(html, "html.parser")
@@ -949,6 +1011,8 @@ def serve() -> FastMCP:
         Executes as a background task if client requests it, otherwise synchronous.
         Progress updates are streamed via the MCP task protocol.
 
+        t3/t4/t5: Applies browser pool round-robin, timeout control, and concurrency limit.
+
         Args:
             url: The URL to fetch
             output_format: Output format (html, text, or screenshot) (default: html)
@@ -957,9 +1021,11 @@ def serve() -> FastMCP:
         Returns:
             Page content as HTML, plain text, or base64-encoded screenshot
         """
-        import base64
+        # t5: Concurrency control for web_fetch
+        async with _web_tools_semaphore:
+            import base64
 
-        # --- Task Tracking Setup ---
+            # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
         task_store = get_task_store()
         task_record = TaskRecord(
@@ -977,7 +1043,8 @@ def serve() -> FastMCP:
         task_logger.info("task_created", url=url[:100])
 
         try:
-            llm, profile = _get_llm_and_profile()
+            # t3: Use browser pool profile
+            llm, profile = _get_llm_and_profile_for_web_tools()
         except LLMProviderError as e:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
@@ -1021,6 +1088,7 @@ def serve() -> FastMCP:
 
             # Wait a moment for page to render
             import asyncio as _asyncio
+
             await _asyncio.sleep(1)
 
             await ctx.info(f"Extracting content as {output_format}...")
