@@ -39,6 +39,61 @@ def get_default_results_dir() -> Path:
 CONFIG_FILE = get_config_dir() / "config.json"
 
 
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a simple .env file into key/value pairs."""
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        values[key] = value
+
+    return values
+
+
+def _load_env_files() -> None:
+    """Populate os.environ from .env files in common locations."""
+    explicit_path = os.environ.get("MCP_BROWSER_USE_ENV_FILE") or os.environ.get("ENV_FILE")
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+
+    cwd = Path.cwd().resolve()
+    repo_root = Path(__file__).resolve().parents[2]
+    for base in (cwd, repo_root, Path.home()):
+        if not base.exists():
+            continue
+        candidates.append(base / ".env")
+        candidates.append(base / "use-browser" / ".env")
+        if base != base.parent:
+            candidates.append(base.parent / "use-browser" / ".env")
+
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.expanduser().resolve()
+        if resolved in seen or not resolved.exists():
+            continue
+        seen.add(resolved)
+        for key, value in _parse_env_file(resolved).items():
+            os.environ.setdefault(key, value)
+
+
+_load_env_files()
+
+
 def load_config_file() -> dict[str, Any]:
     """Load settings from the JSON config file if it exists."""
     if not CONFIG_FILE.exists():

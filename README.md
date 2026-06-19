@@ -4,7 +4,7 @@ MCP server that gives AI assistants the power to control a web browser.
 
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-> **Note**: This is an **internal fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use). The fork is hosted at [`github.com/captain99999999/mcp-browser-use`](https://github.com/captain99999999/mcp-browser-use) and is the **only** push target. For fork-specific changes (Handover Lock, `web_search` / `web_fetch`, deployment), see [CLAUDE.md](CLAUDE.md).
+> **Note**: This is an **internal fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use). The fork is hosted at [`github.com/captain99999999/mcp-browser-use`](https://github.com/captain99999999/mcp-browser-use) and is the **only** push target. For fork-specific changes (Handover Lock, `web_search` / `web_fetch`, deployment), see [.github/copilot-instructions.md](.github/copilot-instructions.md).
 
 ---
 
@@ -29,9 +29,9 @@ MCP server that gives AI assistants the power to control a web browser.
 
 ## What is this?
 
-**Origin**: forked from [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use) for internal customization. All development happens on the `fev` branch of the fork; see [CLAUDE.md](CLAUDE.md) for the workflow.
+**Origin**: forked from [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use) for internal customization. All development happens on the `fev` branch; see [.github/copilot-instructions.md](.github/copilot-instructions.md) for the workflow.
 
-This wraps [browser-use](https://github.com/browser-use/browser-use) as an MCP server, letting Claude (or any MCP client) automate a real browser—navigate pages, fill forms, click buttons, extract data, and more.
+This wraps [browser-use](https://github.com/browser-use/browser-use) as an MCP server, letting AI assistants (via MCP clients like GitHub Copilot) automate a real browser—navigate pages, fill forms, click buttons, extract data, and more.
 
 ### Why HTTP instead of stdio?
 
@@ -40,32 +40,6 @@ Browser automation tasks take 30-120+ seconds. The standard MCP stdio transport 
 ---
 
 ## Installation
-
-### Claude Code Plugin (Recommended)
-
-Install as a Claude Code plugin for automatic setup:
-
-```bash
-# Install the plugin
-/plugin install browser-use/mcp-browser-use
-```
-
-The plugin automatically:
-- Installs Playwright browsers on first run
-- Starts the HTTP daemon when Claude Code starts
-- Registers the MCP server with Claude
-
-**Set your API key** (the browser agent needs an LLM to decide actions):
-
-```bash
-# Set API key (environment variable - recommended)
-export GEMINI_API_KEY=your-key-here
-
-# Or use config file
-mcp-server-browser-use config set -k llm.api_key -v your-key-here
-```
-
-That's it! Claude can now use browser automation tools.
 
 ### Manual Installation
 
@@ -84,20 +58,7 @@ uv run playwright install chromium
 uv run mcp-server-browser-use server
 ```
 
-**Add to Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "browser-use": {
-      "type": "streamable-http",
-      "url": "http://localhost:8383/mcp"
-    }
-  }
-}
-```
-
-For MCP clients that don't support HTTP transport, use `mcp-remote` as a proxy:
+For MCP clients that don't support HTTP transport natively, use `mcp-remote` as a proxy:
 
 ```json
 {
@@ -845,7 +806,7 @@ Event format:
 ```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           MCP CLIENTS                                    │
-│              (Claude Desktop, mcp-remote, CLI call)                      │
+│           (GitHub Copilot, mcp-remote, CLI call)                        │
 └─────────────────────────────────┬───────────────────────────────────────┘
                                   │ HTTP POST /mcp
                                   ▼
@@ -935,7 +896,7 @@ This section links to the in-repo development guides. Read these before contribu
 | Document | Purpose |
 |---|---|
 | [AGENTS.md](AGENTS.md) | Required workflow for LLM-driven engineering agents: lint, format, type-check, test commands; coding standards; testing patterns; CI fix order |
-| [CLAUDE.md](CLAUDE.md) | Local fork notes: branch strategy (`fev` vs `main`), Handover Lock customization, upstream sync procedure |
+| [.github/copilot-instructions.md](.github/copilot-instructions.md) | Fork-specific instructions: branch strategy (`fev` vs `main`), Handover Lock customization, upstream sync procedure |
 | [FASTMCP_PREVENTION_STRATEGIES.md](FASTMCP_PREVENTION_STRATEGIES.md) | FastMCP-specific gotchas and patterns (HTTP transport, context propagation, streaming) |
 
 ### Local quick reference
@@ -964,7 +925,8 @@ mcp-browser-use/                 # this repo (fork of Saik0s/mcp-browser-use)
 ├── tests/                       # pytest suite (unit + e2e markers)
 ├── docs/                        # design notes
 ├── AGENTS.md                    # ← dev workflow (read first)
-├── CLAUDE.md                    # ← local fork notes
+├── .github/
+│   └── copilot-instructions.md  # ← fork-specific instructions
 └── FASTMCP_PREVENTION_STRATEGIES.md
 ```
 

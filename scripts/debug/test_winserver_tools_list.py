@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """测试 winserver MCP 服务的 web_search 和 web_fetch 工具（正确格式）"""
 
-import requests
 import json
 import sys
+
+import requests
 
 MCP_BASE_URL = "http://192.168.110.250:8383/mcp"
 
@@ -95,7 +96,7 @@ def test_web_search():
                 # 尝试解析为 JSON（搜索结果）
                 try:
                     search_results = json.loads(result_text)
-                    print(f"\n搜索结果:")
+                    print("\n搜索结果:")
                     for i, item in enumerate(search_results[:3]):
                         title = item.get("title", "未知")
                         url = item.get("url", "未知")

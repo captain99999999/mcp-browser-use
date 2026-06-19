@@ -81,6 +81,13 @@ from fastmcp.dependencies import CurrentContext, Progress
 from fastmcp.server.context import Context
 from fastmcp.server.tasks.config import TaskConfig
 
+# Web search utilities
+from mcp_server_browser_utils.search import (
+    SearchResult,
+    deduplicate_results,
+    generate_search_queries,
+)
+
 from .config import settings
 from .exceptions import BrowserError, LLMProviderError
 from .observability import TaskRecord, TaskStage, TaskStatus, bind_task_context, clear_task_context, get_task_logger, setup_structured_logging
@@ -89,14 +96,6 @@ from .providers import get_llm
 from .research.machine import ResearchMachine
 from .skills import SkillAnalyzer, SkillExecutor, SkillRecorder, SkillRunner, SkillStore
 from .utils import save_execution_result
-
-# Web search utilities
-from mcp_server_browser_utils.search import (
-    generate_search_queries,
-    search_duckduckgo,
-    deduplicate_results,
-    SearchResult,
-)
 
 if TYPE_CHECKING:
     from browser_use.agent.views import AgentOutput
@@ -837,8 +836,9 @@ def serve() -> FastMCP:
         # t5: Concurrency control for web_search
         async with _web_tools_semaphore:
             import json
-            from bs4 import BeautifulSoup
             from urllib.parse import quote_plus
+
+            from bs4 import BeautifulSoup
 
         # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
@@ -1023,7 +1023,7 @@ def serve() -> FastMCP:
         """
         # t5: Concurrency control for web_fetch
         async with _web_tools_semaphore:
-            import base64
+            pass
 
             # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())

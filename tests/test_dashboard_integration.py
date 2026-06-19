@@ -34,8 +34,6 @@ def client(monkeypatch):
     mcp_server_browser_use.server.settings = mcp_server_browser_use.config.settings
     importlib.reload(mcp_server_browser_use.server)
 
-    from mcp_server_browser_use.server import serve
-
     server = serve()
     # Create Starlette TestClient for the ASGI app
     return TestClient(server.http_app())
