@@ -26,8 +26,8 @@ root_cause: |
   Using Context() or Progress=None causes Pydantic schema generation failures during
   test collection. Additionally, MCP SDK's testing utilities are incompatible with FastMCP.
 related_files:
-  - plans/feat-fastmcp-background-tasks.md
-  - CLAUDE.md
+  - docs/solutions/implemented-plans/feat-fastmcp-background-tasks.md
+  - .github/copilot-instructions.md
   - README.md
 ---
 
@@ -291,7 +291,7 @@ mcp__plugin_compound-engineering_context7__get-library-docs(
 
 ## Related Documentation
 
-- [FastMCP Background Tasks Plan](../../plans/feat-fastmcp-background-tasks.md)
+- [FastMCP Background Tasks Plan](../implemented-plans/feat-fastmcp-background-tasks.md)
 - [FastMCP Official Docs](https://gofastmcp.com/)
 - [Context7 FastMCP Reference](/jlowin/fastmcp)
 

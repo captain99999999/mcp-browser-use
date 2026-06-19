@@ -92,8 +92,10 @@ cover/
 # 本地临时调试脚本（不入版本控制，避免污染 git status）
 test_proxy.py
 google_dump.html
-# 个人 Claude Code 配置
+# 非 Copilot 工具配置文件（已清理，防止重新生成）
 .claude/
+.beads/
+.mcp.json
 
 # Translations
 *.mo

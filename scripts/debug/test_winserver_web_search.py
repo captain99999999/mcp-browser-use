@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """测试 winserver MCP 服务的 web_search 和 web_fetch 工具"""
 
-import requests
-import json
 import sys
+
+import requests
 
 MCP_BASE_URL = "http://192.168.110.250:8383"
 

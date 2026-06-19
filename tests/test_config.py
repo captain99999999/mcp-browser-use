@@ -1,5 +1,6 @@
 """Tests for configuration and API key resolution."""
 
+import importlib
 import os
 
 import pytest
@@ -146,6 +147,23 @@ class TestApiKeyResolution:
         settings = LLMSettings()
         assert settings.get_api_key_for_provider() is None
         assert settings.requires_api_key()
+
+    def test_dotenv_file_is_loaded(self, monkeypatch, tmp_path):
+        """A .env file in the working tree should provide provider secrets."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DEEPSEEK_API_KEY=dotenv-key\nMCP_LLM_PROVIDER=deepseek\n", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("MCP_LLM_PROVIDER", raising=False)
+
+        import mcp_server_browser_use.config as config_module
+
+        importlib.reload(config_module)
+
+        settings = config_module.LLMSettings()
+        assert settings.provider == "deepseek"
+        assert settings.get_api_key_for_provider() == "dotenv-key"
 
 
 class TestLLMSettingsDefaults:

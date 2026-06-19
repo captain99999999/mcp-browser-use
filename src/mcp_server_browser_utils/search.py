@@ -1,6 +1,5 @@
 """Web search utilities using LLM-optimized queries and DuckDuckGo API."""
 
-import asyncio
 import json
 import logging
 import re

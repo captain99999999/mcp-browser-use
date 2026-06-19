@@ -15,7 +15,9 @@ import pytest
 from fastmcp import Client
 
 # Skip entire module if no API key is configured
-API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+API_KEY = (
+    os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+)
 
 pytestmark = [
     pytest.mark.e2e,
