@@ -37,8 +37,10 @@ src/
 │   └── research/                  # deep research workflow
 └── mcp_server_browser_utils/      # fork-specific: Google HTML parser + query generator
 tests/                             # pytest (unit + integration_tests/)
+scripts/                           # operational scripts
+├── debug/                         # ad-hoc diagnostic scripts (never in project root)
 docs/                              # design notes
-AGENTS.md / CLAUDE.md              # full dev guidelines (read [CLAUDE.md](CLAUDE.md) for fork context)
+AGENTS.md                          # full dev guidelines
 FASTMCP_PREVENTION_STRATEGIES.md   # FastMCP-specific gotchas
 ```
 
@@ -70,12 +72,12 @@ E2E tests (`tests/integration_tests/test_web_tools.py` and similar) require:
 ## Common pitfalls
 
 - **Tool definition pattern**: every new MCP tool needs both `@server.tool(...)` decorator AND a `TaskConfig(mode="optional")` if it should run as a background task. See `web_search` in `server.py` for the canonical example.
-- **Test file naming**: `test_*.py` files at the repo root are blocked by `.gitignore` (we use `tests/` and `tests/integration_tests/`).
+- **Test location**: all tests must go in `tests/` or `tests/integration_tests/`. Ad-hoc debug scripts go in `scripts/debug/`, never in the project root.
 - **README code blocks**: must declare a language tag (e.g., ```text for ASCII diagrams).
 
 ## Detailed references (read on demand)
 
-- Fork-specific workflow, deployment, upstream sync → [CLAUDE.md](../CLAUDE.md)
+- Fork-specific workflow, deployment, upstream sync → [copilot-instructions.md](copilot-instructions.md)
 - Coding standards, test patterns, CI fix order → [AGENTS.md](../AGENTS.md)
 - User-facing docs → [README.md](../README.md)
 - FastMCP gotchas → [FASTMCP_PREVENTION_STRATEGIES.md](../FASTMCP_PREVENTION_STRATEGIES.md)
