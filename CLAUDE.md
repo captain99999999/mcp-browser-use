@@ -37,6 +37,8 @@ uv run playwright install chromium
 uv sync && uv run ruff format . && uv run ruff check . && uv run pyright && uv run pytest
 ```
 
+**临时脚本规范**：调试/诊断脚本一律放 `scripts/debug/`，不得散落在项目根目录。任务完成后及时清理。
+
 ### 核心定制说明
 
 **Handover Lock 功能**：
