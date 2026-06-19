@@ -4,6 +4,10 @@
 
 MCP server that wraps [browser-use](https://github.com/browser-use/browser-use) for AI-driven browser automation. HTTP-only transport (stdio deprecated due to timeout issues with long-running browser tasks).
 
+> **Note**: This repository is a **fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use).
+> The fork lives at `github.com/captain99999999/mcp-browser-use` and is the **only** push target.
+> For fork-specific guidance (Handover Lock, custom tools, deployment) see [copilot-instructions.md](.github/copilot-instructions.md).
+
 ## Required Development Workflow
 
 **CRITICAL**: Always run these commands before committing:
@@ -26,13 +30,17 @@ uv run pytest              # Run tests
 | `├─ server.py` | FastMCP server + MCP tools |
 | `├─ cli.py` | Typer CLI for daemon management |
 | `├─ config.py` | Pydantic settings |
-| `├─ providers.py` | LLM factory (12 providers) |
 | `├─ observability/` | Task tracking (SQLite persistence) |
 | `├─ research/` | Deep research workflow |
 | `└─ skills/` | Machine-learned browser skills |
+| `src/mcp_server_browser_utils/` | Web search utilities (Google HTML parser, query generator) — **fork-specific** |
 | `tests/` | Pytest test suite |
+| `├─ integration_tests/` | End-to-end integration tests (real LLM + real browser) |
+| `scripts/` | Operational scripts |
+| `├─ debug/` | Ad-hoc diagnostic scripts (winserver probes, one-off checks) |
 | `docs/` | Design documents |
-| `examples/` | Example usage |
+| `plans/` | Architecture and implementation plans |
+| `skills/` | Browser automation skill definitions |
 
 ## Core MCP Tools
 
@@ -149,8 +157,8 @@ When CI fails, fix in this order:
 ### Documentation
 
 - Update README when features change
-- Update CLAUDE.md for development guidance
 - Keep config tables in sync with code
+- **Ad-hoc debug scripts** go in `scripts/debug/`, never in the project root. Clean up after the task.
 
 ## Security Considerations
 

@@ -56,9 +56,26 @@ class TaskStore:
                     input_params TEXT NOT NULL,
                     result TEXT,
                     error TEXT,
-                    session_id TEXT
+                    session_id TEXT,
+                    last_operator TEXT,
+                    handover_note TEXT,
+                    handover_action TEXT,
+                    handover_at TEXT
                 )
             """)
+
+            # Backward-compatible migration for existing databases.
+            async with db.execute("PRAGMA table_info(tasks)") as cursor:
+                columns = {row[1] for row in await cursor.fetchall()}
+
+            if "last_operator" not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN last_operator TEXT")
+            if "handover_note" not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN handover_note TEXT")
+            if "handover_action" not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN handover_action TEXT")
+            if "handover_at" not in columns:
+                await db.execute("ALTER TABLE tasks ADD COLUMN handover_at TEXT")
 
             # Indexes for common queries
             await db.execute("CREATE INDEX IF NOT EXISTS idx_status ON tasks(status)")
@@ -78,8 +95,9 @@ class TaskStore:
                 INSERT INTO tasks (
                     task_id, tool_name, status, stage, created_at, started_at, completed_at,
                     progress_current, progress_total, progress_message, input_params,
-                    result, error, session_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    result, error, session_id, last_operator, handover_note,
+                    handover_action, handover_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     task.task_id,
@@ -96,6 +114,41 @@ class TaskStore:
                     task.result,
                     task.error,
                     task.session_id,
+                    task.last_operator,
+                    task.handover_note,
+                    task.handover_action,
+                    task.handover_at.isoformat() if task.handover_at else None,
+                ),
+            )
+            await db.commit()
+
+    async def update_handover(
+        self,
+        task_id: str,
+        *,
+        operator: str,
+        action: str,
+        note: str | None = None,
+    ) -> None:
+        """Persist latest human-in-the-loop action metadata."""
+        await self.initialize()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE tasks
+                SET last_operator = ?,
+                    handover_action = ?,
+                    handover_note = ?,
+                    handover_at = ?
+                WHERE task_id = ?
+            """,
+                (
+                    operator[:120] if operator else "human",
+                    action[:40],
+                    (note or "")[:500] or None,
+                    datetime.now(UTC).isoformat(),
+                    task_id,
                 ),
             )
             await db.commit()
@@ -196,8 +249,8 @@ class TaskStore:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC",
-                (TaskStatus.RUNNING.value,),
+                "SELECT * FROM tasks WHERE status IN (?, ?) ORDER BY created_at DESC",
+                (TaskStatus.RUNNING.value, TaskStatus.PAUSED.value),
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [self._row_to_task(row) for row in rows]
@@ -314,6 +367,10 @@ class TaskStore:
             result=row["result"],
             error=row["error"],
             session_id=row["session_id"],
+            last_operator=row["last_operator"],
+            handover_note=row["handover_note"],
+            handover_action=row["handover_action"],
+            handover_at=datetime.fromisoformat(row["handover_at"]) if row["handover_at"] else None,
         )
 
 

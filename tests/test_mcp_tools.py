@@ -97,7 +97,9 @@ class TestListTools:
         assert "task_list" in tool_names
         assert "task_get" in tool_names
         assert "task_cancel" in tool_names
-        assert len(tool_names) == 9
+        assert "task_pause" in tool_names
+        assert "task_resume" in tool_names
+        assert len(tool_names) == 11
 
     @pytest.mark.anyio
     async def test_list_tools_skills_disabled(self, client_skills_disabled: Client):
@@ -113,11 +115,13 @@ class TestListTools:
         assert "task_list" in tool_names
         assert "task_get" in tool_names
         assert "task_cancel" in tool_names
+        assert "task_pause" in tool_names
+        assert "task_resume" in tool_names
         # Skill management tools should NOT be present when skills disabled
         assert "skill_list" not in tool_names
         assert "skill_get" not in tool_names
         assert "skill_delete" not in tool_names
-        assert len(tool_names) == 6
+        assert len(tool_names) == 8
 
     @pytest.mark.anyio
     async def test_run_browser_agent_tool_schema(self, client: Client):

@@ -12,6 +12,7 @@ class TaskStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -56,6 +57,12 @@ class TaskRecord(BaseModel):
 
     # Context
     session_id: str | None = None  # For grouping related tasks
+
+    # Human-in-the-loop collaboration metadata
+    last_operator: str | None = None
+    handover_note: str | None = None
+    handover_action: str | None = None
+    handover_at: datetime | None = None
 
     @property
     def duration_seconds(self) -> float | None:

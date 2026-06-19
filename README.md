@@ -4,6 +4,8 @@ MCP server that gives AI assistants the power to control a web browser.
 
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
+> **Note**: This is an **internal fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use). The fork is hosted at [`github.com/captain99999999/mcp-browser-use`](https://github.com/captain99999999/mcp-browser-use) and is the **only** push target. For fork-specific changes (Handover Lock, `web_search` / `web_fetch`, deployment), see [CLAUDE.md](CLAUDE.md).
+
 ---
 
 ## Table of Contents
@@ -20,11 +22,14 @@ MCP server that gives AI assistants the power to control a web browser.
 - [Skills System](#skills-system-super-alpha)
 - [REST API Reference](#rest-api-reference)
 - [Architecture](#architecture)
+- [Development](#development)
 - [License](#license)
 
 ---
 
 ## What is this?
+
+**Origin**: forked from [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use) for internal customization. All development happens on the `fev` branch of the fork; see [CLAUDE.md](CLAUDE.md) for the workflow.
 
 This wraps [browser-use](https://github.com/browser-use/browser-use) as an MCP server, letting Claude (or any MCP client) automate a real browser—navigate pages, fill forms, click buttons, extract data, and more.
 
@@ -68,7 +73,7 @@ For other MCP clients or standalone use:
 
 ```bash
 # Clone and install
-git clone https://github.com/Saik0s/mcp-browser-use.git
+git clone https://github.com/captain99999999/mcp-browser-use.git
 cd mcp-server-browser-use
 uv sync
 
@@ -187,7 +192,7 @@ mcp-server-browser-use config set -k agent.max_steps -v 30
 
 ### Config Priority
 
-```
+```text
 Environment Variables > Config File > Defaults
 ```
 
@@ -276,12 +281,17 @@ These tools are exposed via MCP for AI clients:
 |------|-------------|------------------|
 | `run_browser_agent` | Execute browser automation tasks | 60-120s |
 | `run_deep_research` | Multi-search research with synthesis | 2-5 min |
+| `web_search` | Google search via browser + LLM query optimization | 10-30s |
+| `web_fetch` | Fetch web page content with JS rendering (HTML/text/screenshot) | 5-15s |
 | `skill_list` | List learned skills | <1s |
 | `skill_get` | Get skill definition | <1s |
 | `skill_delete` | Delete a skill | <1s |
 | `health_check` | Server status and running tasks | <1s |
 | `task_list` | Query task history | <1s |
 | `task_get` | Get full task details | <1s |
+| `task_pause` | Pause a running browser task | <1s |
+| `task_resume` | Resume a paused browser task | <1s |
+| `task_cancel` | Cancel a running task (with handover lock) | <1s |
 
 ### run_browser_agent
 
@@ -317,13 +327,77 @@ mcp-server-browser-use call run_deep_research \
 
 The agent searches multiple sources, extracts key findings, and compiles a markdown report.
 
+### web_search
+
+Search the web using Google and browser-based HTML parsing, with LLM-optimized queries.
+
+```bash
+mcp-server-browser-use call web_search \
+  query="Python asyncio tutorial" \
+  max_results=5 \
+  max_queries=1
+```
+
+**How it works:**
+1. LLM generates optimized search queries from the input topic
+2. Browser navigates to Google search results for each query
+3. BeautifulSoup4 parses titles, URLs, and snippets
+4. Results are deduplicated and returned as JSON
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | string | Search query or question (required) |
+| `max_results` | int | Maximum number of results to return (default 10) |
+| `max_queries` | int | Number of search queries to generate via LLM (default 3) |
+
+**Returns:**
+```json
+[
+  {
+    "title": "Python's asyncio: A Hands-On Walkthrough",
+    "url": "https://realpython.com/async-io-python/",
+    "snippet": "Real Python - asyncio tutorial..."
+  }
+]
+```
+
+### web_fetch
+
+Fetch web page content with full JavaScript rendering support using browser automation.
+
+```bash
+mcp-server-browser-use call web_fetch \
+  url="https://www.example.com" \
+  output_format="text"
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `url` | string | The URL to fetch (required) |
+| `output_format` | string | Output format: `html`, `text`, or `screenshot` (default: `html`) |
+
+**How it works:**
+1. Starts a browser session via BrowserSession
+2. Navigates to the target URL with JS rendering
+3. Extracts content in the requested format
+4. Returns the result (truncated at 100KB)
+
+**Output formats:**
+- `html` — Full page HTML source
+- `text` — Visible text content (document.body.innerText)
+- `screenshot` — Base64-encoded PNG screenshot
+
 ---
 
 ## Deep Research
 
 Deep research executes a 3-phase workflow:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │  Phase 1: PLANNING                                       │
 │  LLM generates 3-5 focused search queries from topic     │
@@ -358,7 +432,7 @@ All tool executions are tracked in SQLite for debugging and monitoring.
 
 ### Task Lifecycle
 
-```
+```text
 PENDING ──► RUNNING ──► COMPLETED
                │
                ├──► FAILED
@@ -369,7 +443,7 @@ PENDING ──► RUNNING ──► COMPLETED
 
 During execution, tasks progress through granular stages:
 
-```
+```text
 INITIALIZING → PLANNING → NAVIGATING → EXTRACTING → SYNTHESIZING
 ```
 
@@ -381,7 +455,7 @@ INITIALIZING → PLANNING → NAVIGATING → EXTRACTING → SYNTHESIZING
 mcp-server-browser-use tasks
 ```
 
-```
+```text
 ┌──────────────┬───────────────────┬───────────┬──────────┬──────────┐
 │ ID           │ Tool              │ Status    │ Progress │ Duration │
 ├──────────────┼───────────────────┼───────────┼──────────┼──────────┤
@@ -411,6 +485,9 @@ AI clients can query task status directly:
 - `health_check` - Server status + list of running tasks
 - `task_list` - Recent tasks with optional status filter
 - `task_get` - Full details of a specific task
+- `task_pause` - Pause a running task at next checkpoint
+- `task_resume` - Resume a paused task
+- `task_cancel` - Cancel a running task (with handover lock)
 
 ### Storage
 
@@ -440,7 +517,7 @@ Browser automation is slow (60-120 seconds per task). But most websites have API
 
 Skills capture the API calls made during a browser session and replay them directly via CDP (Chrome DevTools Protocol).
 
-```
+```text
 Without Skills:  Browser navigation → 60-120 seconds
 With Skills:     Direct API call    → 1-3 seconds
 ```
@@ -477,7 +554,7 @@ Every skill supports two execution paths:
 
 If the skill captured an API endpoint (`SkillRequest`):
 
-```
+```text
 Initialize CDP session
     ↓
 Navigate to domain (establish cookies)
@@ -493,7 +570,7 @@ Return data
 
 If direct execution fails or no API was found:
 
-```
+```text
 Inject navigation hints into task prompt
     ↓
 Agent uses hints as guidance
@@ -581,7 +658,7 @@ The server exposes REST endpoints for direct HTTP access. All endpoints return J
 
 ### Base URL
 
-```
+```text
 http://localhost:8383
 ```
 
@@ -765,7 +842,7 @@ Event format:
 
 ### High-Level Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           MCP CLIENTS                                    │
 │              (Claude Desktop, mcp-remote, CLI call)                      │
@@ -777,7 +854,8 @@ Event format:
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │                      MCP TOOLS                                    │   │
 │  │  • run_browser_agent    • skill_list/get/delete                  │   │
-│  │  • run_deep_research    • health_check/task_list/task_get        │   │
+│  │  • run_deep_research    • web_search / web_fetch                 │   │
+│  │  • health_check         • task_list/get/pause/resume/cancel      │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 └────────┬──────────────┬─────────────────┬────────────────┬──────────────┘
          │              │                 │                │
@@ -796,7 +874,7 @@ Event format:
 
 ### Module Structure
 
-```
+```text
 src/mcp_server_browser_use/
 ├── server.py            # FastMCP server + MCP tools
 ├── cli.py               # Typer CLI for daemon management
@@ -819,6 +897,9 @@ src/mcp_server_browser_use/
 └── research/            # Deep research workflow
     ├── models.py        # SearchResult, ResearchSource
     └── machine.py       # Plan → Search → Synthesize
+
+src/mcp_server_browser_utils/
+└── search.py            # Web search utilities (Google parsing, query generation)
 ```
 
 ### File Locations
@@ -844,6 +925,50 @@ src/mcp_server_browser_use/
 - AWS Bedrock
 - OpenRouter
 - Vercel AI
+
+---
+
+## Development
+
+This section links to the in-repo development guides. Read these before contributing.
+
+| Document | Purpose |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Required workflow for LLM-driven engineering agents: lint, format, type-check, test commands; coding standards; testing patterns; CI fix order |
+| [CLAUDE.md](CLAUDE.md) | Local fork notes: branch strategy (`fev` vs `main`), Handover Lock customization, upstream sync procedure |
+| [FASTMCP_PREVENTION_STRATEGIES.md](FASTMCP_PREVENTION_STRATEGIES.md) | FastMCP-specific gotchas and patterns (HTTP transport, context propagation, streaming) |
+
+### Local quick reference
+
+```bash
+# Sync deps
+uv sync
+
+# Format / lint / type-check / test
+uv run ruff format .
+uv run ruff check .
+uv run pyright
+uv run pytest
+
+# Run the server in foreground (for debugging)
+uv run mcp-server-browser-use server -f
+```
+
+### Repository layout
+
+```text
+mcp-browser-use/                 # this repo (fork of Saik0s/mcp-browser-use)
+├── src/
+│   ├── mcp_server_browser_use/  # server, tools, skills, research
+│   └── mcp_server_browser_utils/  # Google HTML parser, query generator
+├── tests/                       # pytest suite (unit + e2e markers)
+├── docs/                        # design notes
+├── AGENTS.md                    # ← dev workflow (read first)
+├── CLAUDE.md                    # ← local fork notes
+└── FASTMCP_PREVENTION_STRATEGIES.md
+```
+
+> Local scripts under `test_*.py` or `*_local.py` are untracked on purpose — never commit API keys or environment-specific paths.
 
 ---
 

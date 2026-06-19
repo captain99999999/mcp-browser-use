@@ -51,6 +51,28 @@ def _configure_stdio_logging() -> None:
 # Configure logging BEFORE importing browser_use and other noisy dependencies
 _configure_stdio_logging()
 
+# --- Web Tools Concurrency & Pool Control (t3/t4/t5) ---
+# Only applies to web_search and web_fetch tools
+# Initialized later in serve() after settings are loaded
+_web_tools_semaphore: asyncio.Semaphore | None = None
+_browser_pool_index = 0
+
+
+def _get_browser_pool_url() -> str | None:
+    """Get next CDP URL from pool using round-robin.
+
+    Returns:
+        Next CDP URL or None if no URLs configured.
+    """
+    global _browser_pool_index
+    urls = settings.browser.get_cdps_url_or_urls()
+    if not urls:
+        return None
+    url = urls[_browser_pool_index % len(urls)]
+    _browser_pool_index += 1
+    return url
+
+
 # ruff: noqa: E402 - Intentional late imports after logging configuration
 from browser_use import Agent, BrowserProfile
 from browser_use.browser.profile import ProxySettings
@@ -68,6 +90,14 @@ from .research.machine import ResearchMachine
 from .skills import SkillAnalyzer, SkillExecutor, SkillRecorder, SkillRunner, SkillStore
 from .utils import save_execution_result
 
+# Web search utilities
+from mcp_server_browser_utils.search import (
+    generate_search_queries,
+    search_duckduckgo,
+    deduplicate_results,
+    SearchResult,
+)
+
 if TYPE_CHECKING:
     from browser_use.agent.views import AgentOutput
     from browser_use.browser.views import BrowserStateSummary
@@ -78,6 +108,71 @@ logger.setLevel(getattr(logging, settings.server.logging_level.upper()))
 
 # Global registry of running asyncio tasks for cancellation support
 _running_tasks: dict[str, asyncio.Task] = {}
+# Cooperative pause controls for pausable task types.
+_pause_events: dict[str, asyncio.Event] = {}
+
+
+def _iter_running_task_ids() -> list[str]:
+    """Return active task IDs excluding internal background wrappers."""
+    return [task_id for task_id in _running_tasks if not task_id.endswith("_bg")]
+
+
+def _match_running_task_id(task_id: str) -> str | None:
+    """Resolve a full running task ID from exact or prefix input."""
+    for full_id in _iter_running_task_ids():
+        if full_id == task_id or full_id.startswith(task_id):
+            return full_id
+    return None
+
+
+def _ensure_pause_event(task_id: str) -> asyncio.Event:
+    """Create or get a cooperative pause event for a task."""
+    event = _pause_events.get(task_id)
+    if event is None:
+        event = asyncio.Event()
+        event.set()
+        _pause_events[task_id] = event
+    return event
+
+
+def _clear_pause_event(task_id: str) -> None:
+    """Remove pause control state after task exits."""
+    _pause_events.pop(task_id, None)
+
+
+def _normalize_operator(operator: str | None) -> str:
+    """Normalize operator name from UI/API input."""
+    value = (operator or "").strip()
+    return value[:120] if value else "human"
+
+
+def _handover_lock_owner(task, actor: str) -> str | None:
+    """Return lock owner if task is paused by another operator."""
+    if task.status != TaskStatus.PAUSED:
+        return None
+    if task.handover_action != "pause":
+        return None
+    owner = (task.last_operator or "").strip()
+    if not owner:
+        return None
+    return owner if owner != actor else None
+
+
+async def _wait_if_paused(task_id: str, task_store, message: str = "Paused by user") -> None:
+    """Block cooperative execution while task is paused."""
+    pause_event = _pause_events.get(task_id)
+    if not pause_event or pause_event.is_set():
+        return
+
+    await task_store.update_status(task_id, TaskStatus.PAUSED)
+    while True:
+        pause_event = _pause_events.get(task_id)
+        if not pause_event or pause_event.is_set():
+            break
+        await asyncio.sleep(0.2)
+
+    await task_store.update_status(task_id, TaskStatus.RUNNING)
+    await task_store.update_progress(task_id, 0, 0, message, TaskStage.NAVIGATING)
 
 
 def serve() -> FastMCP:
@@ -86,6 +181,10 @@ def serve() -> FastMCP:
     setup_structured_logging()
 
     server = FastMCP("mcp_server_browser_use")
+
+    # Initialize web tools semaphore (t5: concurrency control for web_search/web_fetch)
+    global _web_tools_semaphore
+    _web_tools_semaphore = asyncio.Semaphore(min(settings.server.max_concurrent_tasks, 5))
 
     # Initialize skill components (only when skills feature is enabled)
     skill_store: SkillStore | None = None
@@ -117,6 +216,38 @@ def serve() -> FastMCP:
         )
         if settings.browser.cdp_url:
             logger.info(f"Using external browser via CDP: {settings.browser.cdp_url}")
+        return llm, profile
+
+    def _get_llm_and_profile_for_web_tools():
+        """t3: Helper with browser pool support for web_search/web_fetch."""
+        if _web_tools_semaphore is None:
+            raise RuntimeError("Web tools not initialized")
+
+        llm = get_llm(
+            provider=settings.llm.provider,
+            model=settings.llm.model_name,
+            api_key=settings.llm.get_api_key_for_provider(),
+            base_url=settings.llm.base_url,
+            azure_endpoint=settings.llm.azure_endpoint,
+            azure_api_version=settings.llm.azure_api_version,
+            aws_region=settings.llm.aws_region,
+        )
+        proxy = None
+        if settings.browser.proxy_server:
+            proxy = ProxySettings(server=settings.browser.proxy_server, bypass=settings.browser.proxy_bypass)
+
+        # t3: Get next browser URL from pool
+        cdp_url = _get_browser_pool_url() or settings.browser.cdp_url
+
+        profile = BrowserProfile(
+            headless=settings.browser.headless,
+            proxy=proxy,
+            cdp_url=cdp_url,
+            user_data_dir=settings.browser.user_data_dir,
+            chromium_sandbox=settings.browser.chromium_sandbox,
+        )
+        if cdp_url:
+            logger.info(f"Using browser pool CDP: {cdp_url}")
         return llm, profile
 
     @server.tool(task=TaskConfig(mode="optional"))
@@ -325,6 +456,7 @@ def serve() -> FastMCP:
             step_num: int,
         ) -> None:
             nonlocal last_url, last_db_update
+            await _wait_if_paused(task_id, task_store)
             url_changed = state.url != last_url
             if url_changed:
                 await ctx.info(f"→ {state.title or state.url}")
@@ -367,6 +499,7 @@ def serve() -> FastMCP:
                 logger.info("SkillRecorder attached via CDP for network capture")
 
             # Register task for cancellation support
+            _ensure_pause_event(task_id)
             agent_task = asyncio.create_task(agent.run())
             _running_tasks[task_id] = agent_task
             try:
@@ -499,6 +632,7 @@ def serve() -> FastMCP:
                 except Exception as cleanup_error:
                     # Log exception but don't mask the original error
                     logger.exception(f"Critical: Failed to detach CDP listeners in finally block: {cleanup_error}")
+            _clear_pause_event(task_id)
 
     @server.tool(task=TaskConfig(mode="optional"))
     async def run_deep_research(
@@ -674,6 +808,336 @@ def serve() -> FastMCP:
                 return f"Skill '{skill_name}' deleted successfully"
             return f"Error: Skill '{skill_name}' not found"
 
+    # --- Web Tools ---
+
+    @server.tool(task=TaskConfig(mode="optional"))
+    async def web_search(
+        query: str,
+        max_results: int = 10,
+        max_queries: int = 3,
+        ctx: Context = CurrentContext(),
+        progress: Progress = Progress(),
+    ) -> str:
+        """
+        Search the web using Google and browser-based HTML parsing.
+
+        Uses LLM to generate optimized search queries, then navigates Google
+        search results pages via browser to extract titles, URLs, and snippets.
+
+        t3/t4/t5: Applies browser pool round-robin, timeout control, and concurrency limit.
+
+        Args:
+            query: Search query or question
+            max_results: Maximum number of results to return (default 10)
+            max_queries: Number of search queries to generate (default 3)
+
+        Returns:
+            JSON array of search results with title, url, and snippet
+        """
+        # t5: Concurrency control for web_search
+        async with _web_tools_semaphore:
+            import json
+            from bs4 import BeautifulSoup
+            from urllib.parse import quote_plus
+
+        # --- Task Tracking Setup ---
+        task_id = str(uuid.uuid4())
+        task_store = get_task_store()
+        task_record = TaskRecord(
+            task_id=task_id,
+            tool_name="web_search",
+            status=TaskStatus.PENDING,
+            input_params={"query": query, "max_results": max_results, "max_queries": max_queries},
+        )
+        await task_store.create_task(task_record)
+        bind_task_context(task_id, "web_search")
+        task_logger = get_task_logger()
+
+        await ctx.info(f"Starting web search: {query}")
+        logger.info(f"Starting web search: {query[:100]}...")
+        task_logger.info("task_created", query_preview=query[:100])
+
+        try:
+            llm, profile = _get_llm_and_profile()
+        except LLMProviderError as e:
+            logger.error(f"LLM initialization failed: {e}")
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            clear_task_context()
+            return f"Error: {e}"
+
+        # Mark task as running
+        await task_store.update_status(task_id, TaskStatus.RUNNING)
+        task_logger.info("task_running")
+
+        try:
+            # Step 1: Generate search queries using LLM
+            total_steps = max_queries + 2
+            await progress.set_total(total_steps)
+            await ctx.info("Generating optimized search queries...")
+            logger.info(f"Generating {max_queries} search queries for: {query}")
+
+            try:
+                search_queries = await generate_search_queries(query, llm, max_queries)
+            except Exception as e:
+                logger.error(f"Failed to generate search queries: {e}")
+                search_queries = [query]
+
+            await progress.increment()
+            await ctx.info(f"Generated {len(search_queries)} search queries")
+
+            # Step 2: Open a browser session for all searches
+            from browser_use.browser.session import BrowserSession
+
+            await task_store.update_progress(task_id, 1, total_steps, "Opening browser...")
+            browser_session = BrowserSession(browser_profile=profile)
+            await browser_session.start()
+
+            all_results = []
+
+            try:
+                for i, search_query in enumerate(search_queries, 1):
+                    await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query}")
+                    logger.info(f"Executing Google search {i}/{len(search_queries)}: {search_query}")
+
+                    try:
+                        # t3: t4: Navigate with timeout
+                        google_url = f"https://www.google.com/search?q={quote_plus(search_query)}&hl=en"
+                        timeout_seconds = settings.tools.web_search_timeout / max_queries
+                        await asyncio.wait_for(browser_session.navigate_to(google_url), timeout=timeout_seconds)
+                        await asyncio.wait_for(asyncio.sleep(1.5), timeout=5)
+
+                        # t4: Get page content with timeout
+                        page = await browser_session.get_current_page()
+                        html = await asyncio.wait_for(page.evaluate("() => document.documentElement.outerHTML"), timeout=timeout_seconds)
+
+                        # Parse results: find h3 titles, then walk up to extract URL + snippet
+                        soup = BeautifulSoup(html, "html.parser")
+                        result_count = 0
+
+                        for h3 in soup.select("h3"):
+                            if len(all_results) >= max_results:
+                                break
+                            title = h3.get_text(strip=True)
+                            if not title:
+                                continue
+
+                            # Find URL: walk up parent chain for an <a> with href
+                            url = ""
+                            parent = h3.parent
+                            for _ in range(10):
+                                if parent is None:
+                                    break
+                                link = parent.select_one("a[href]")
+                                if link:
+                                    href = link.get("href", "")
+                                    if "/url?q=" in href:
+                                        url = href.split("/url?q=")[-1].split("&")[0]
+                                    elif href.startswith("http"):
+                                        url = href
+                                    if url:
+                                        break
+                                parent = parent.parent
+
+                            # Find snippet: walk up for a div with enough text
+                            snippet = ""
+                            parent = h3.parent
+                            for _ in range(8):
+                                if parent is None:
+                                    break
+                                for div in parent.select("div"):
+                                    text = div.get_text(strip=True)
+                                    if text and len(text) > 30 and text != title:
+                                        snippet = text[:500]
+                                        break
+                                if snippet:
+                                    break
+                                parent = parent.parent
+
+                            if title and url:
+                                all_results.append(SearchResult(title=title[:200], url=url, snippet=snippet))
+                                result_count += 1
+
+                        logger.info(f"Search '{search_query[:30]}...' parsed {result_count} results")
+
+                    except Exception as e:
+                        logger.error(f"Search failed for query '{search_query[:30]}...': {e}")
+
+                    await progress.increment()
+
+                # Deduplicate and limit results
+                unique_results = deduplicate_results(all_results)[:max_results]
+                await task_store.update_progress(task_id, total_steps - 1, total_steps, "Done")
+
+                result_json = json.dumps(
+                    [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in unique_results],
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+                await ctx.info(f"Search completed: {len(unique_results)} results")
+                logger.info(f"Web search completed: {len(unique_results)} results found")
+
+                await task_store.update_status(task_id, TaskStatus.COMPLETED, result=result_json[:500])
+                task_logger.info("task_completed", result_count=len(unique_results))
+                clear_task_context()
+                return result_json
+
+            finally:
+                await browser_session.stop()
+
+        except asyncio.CancelledError:
+            await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
+            task_logger.info("task_cancelled")
+            clear_task_context()
+            raise
+        except Exception as e:
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            task_logger.error("task_failed", error=str(e))
+            clear_task_context()
+            logger.error(f"Web search failed: {e}")
+            raise
+
+    @server.tool(task=TaskConfig(mode="optional"))
+    async def web_fetch(
+        url: str,
+        output_format: str = "html",
+        wait_for_selector: str | None = None,
+        ctx: Context = CurrentContext(),
+        progress: Progress = Progress(),
+    ) -> str:
+        """
+        Fetch web page content with JavaScript rendering support.
+
+        Executes as a background task if client requests it, otherwise synchronous.
+        Progress updates are streamed via the MCP task protocol.
+
+        t3/t4/t5: Applies browser pool round-robin, timeout control, and concurrency limit.
+
+        Args:
+            url: The URL to fetch
+            output_format: Output format (html, text, or screenshot) (default: html)
+            wait_for_selector: Optional CSS selector to wait for (for dynamic content)
+
+        Returns:
+            Page content as HTML, plain text, or base64-encoded screenshot
+        """
+        # t5: Concurrency control for web_fetch
+        async with _web_tools_semaphore:
+            import base64
+
+            # --- Task Tracking Setup ---
+        task_id = str(uuid.uuid4())
+        task_store = get_task_store()
+        task_record = TaskRecord(
+            task_id=task_id,
+            tool_name="web_fetch",
+            status=TaskStatus.PENDING,
+            input_params={"url": url, "output_format": output_format, "wait_for_selector": wait_for_selector},
+        )
+        await task_store.create_task(task_record)
+        bind_task_context(task_id, "web_fetch")
+        task_logger = get_task_logger()
+
+        await ctx.info(f"Fetching: {url}")
+        logger.info(f"Starting web fetch: {url[:100]}...")
+        task_logger.info("task_created", url=url[:100])
+
+        try:
+            # t3: Use browser pool profile
+            llm, profile = _get_llm_and_profile_for_web_tools()
+        except LLMProviderError as e:
+            logger.error(f"LLM initialization failed: {e}")
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            clear_task_context()
+            return f"Error: {e}"
+
+        # Mark task as running
+        await task_store.update_status(task_id, TaskStatus.RUNNING)
+        await task_store.update_progress(task_id, 0, 2, "Initializing browser...")
+        task_logger.info("task_running")
+
+        # Validate URL
+        if not url.startswith(("http://", "https://")):
+            error = f"Invalid URL: {url}"
+            logger.error(error)
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=error)
+            clear_task_context()
+            return f"Error: {error}"
+
+        # Validate output format
+        valid_formats = ["html", "text", "screenshot"]
+        if output_format not in valid_formats:
+            error = f"Invalid output_format: {output_format}. Valid formats: {', '.join(valid_formats)}"
+            logger.error(error)
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=error)
+            clear_task_context()
+            return f"Error: {error}"
+
+        # Start browser session
+        from browser_use.browser.session import BrowserSession
+
+        await task_store.update_progress(task_id, 1, 2, "Loading page...")
+
+        browser_session = BrowserSession(browser_profile=profile)
+        await browser_session.start()
+
+        try:
+            # Navigate to page
+            await ctx.info(f"Navigating to: {url[:80]}...")
+            await browser_session.navigate_to(url)
+
+            # Wait a moment for page to render
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(1)
+
+            await ctx.info(f"Extracting content as {output_format}...")
+
+            if output_format == "html":
+                page = await browser_session.get_current_page()
+                content = await page.evaluate("() => document.documentElement.outerHTML")
+            elif output_format == "text":
+                page = await browser_session.get_current_page()
+                content = await page.evaluate("() => document.body.innerText")
+            elif output_format == "screenshot":
+                content = await browser_session.take_screenshot()
+            else:
+                # This should not happen due to validation above
+                raise ValueError(f"Invalid output_format: {output_format}")
+
+            # Truncate content if too long
+            MAX_CONTENT_SIZE = 100000
+            if len(content) > MAX_CONTENT_SIZE:
+                truncated_content = content[:MAX_CONTENT_SIZE]
+                truncated_content += "\n\n... (content truncated due to size limit)"
+                await ctx.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
+                logger.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
+                content = truncated_content
+
+            await progress.increment()
+            await ctx.info("Fetch completed")
+            logger.info(f"Web fetch completed: {len(content)} characters ({output_format})")
+
+            # Mark task as completed
+            await task_store.update_status(task_id, TaskStatus.COMPLETED, result=content[:500])
+            task_logger.info("task_completed", content_length=len(content), format=output_format)
+            clear_task_context()
+            return content
+
+        except asyncio.CancelledError:
+            await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
+            task_logger.info("task_cancelled")
+            clear_task_context()
+            raise
+        except Exception as e:
+            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+            task_logger.error("task_failed", error=str(e))
+            clear_task_context()
+            logger.error(f"Web fetch failed: {e}")
+            raise
+        finally:
+            await browser_session.stop()
+
     # --- Observability Tools ---
 
     # Define tool functions
@@ -723,7 +1187,7 @@ def serve() -> FastMCP:
             try:
                 status = TaskStatus(status_filter)
             except ValueError:
-                return f"Error: Invalid status '{status_filter}'. Use: running, completed, failed, pending"
+                return f"Error: Invalid status '{status_filter}'. Use: running, paused, completed, failed, pending"
 
         tasks = await task_store.get_task_history(limit=limit, status=status)
 
@@ -737,6 +1201,12 @@ def serve() -> FastMCP:
                         "progress": f"{t.progress_current}/{t.progress_total}",
                         "created": t.created_at.isoformat(),
                         "duration_sec": round(t.duration_seconds, 1) if t.duration_seconds else None,
+                        "handover": {
+                            "operator": t.last_operator,
+                            "action": t.handover_action,
+                            "note": t.handover_note,
+                            "at": t.handover_at.isoformat() if t.handover_at else None,
+                        },
                     }
                     for t in tasks
                 ],
@@ -783,6 +1253,12 @@ def serve() -> FastMCP:
                     "duration_sec": round(task.duration_seconds, 1) if task.duration_seconds else None,
                 },
                 "input": task.input_params,
+                "handover": {
+                    "operator": task.last_operator,
+                    "action": task.handover_action,
+                    "note": task.handover_note,
+                    "at": task.handover_at.isoformat() if task.handover_at else None,
+                },
                 "result": task.result[:500] if task.result else None,
                 "error": task.error,
             },
@@ -829,8 +1305,115 @@ def serve() -> FastMCP:
         """
         return await _task_get_impl(task_id)
 
+    async def _task_cancel_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
+        """Implementation of task cancellation."""
+        import json
+
+        task_store = get_task_store()
+        actor = _normalize_operator(operator)
+
+        # Find by prefix match
+        matched_id = _match_running_task_id(task_id)
+
+        if not matched_id:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+
+        db_task = await task_store.get_task(matched_id)
+        if db_task:
+            owner = _handover_lock_owner(db_task, actor)
+            if owner:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "code": "handover_locked",
+                        "error": f"Task is under manual takeover by '{owner}'. Only lock owner can cancel.",
+                    }
+                )
+
+        # Cancel the asyncio task
+        task = _running_tasks[matched_id]
+        task.cancel()
+
+        # Update status in store
+        await task_store.update_status(matched_id, TaskStatus.CANCELLED, error=f"Cancelled by {actor}")
+        await task_store.update_handover(matched_id, operator=actor, action="cancel", note=note)
+        _clear_pause_event(matched_id)
+
+        return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task cancelled by {actor}"})
+
+    async def _task_pause_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
+        """Implementation of cooperative task pause."""
+        import json
+
+        task_store = get_task_store()
+        matched_id = _match_running_task_id(task_id)
+        if not matched_id:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+
+        task = await task_store.get_task(matched_id)
+        if not task:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found"})
+
+        # Deep research has no cooperative step callback yet.
+        if task.tool_name == "run_deep_research":
+            return json.dumps({"success": False, "error": "Task type does not support pause/resume yet"})
+
+        actor = _normalize_operator(operator)
+        owner = _handover_lock_owner(task, actor)
+        if owner:
+            return json.dumps(
+                {
+                    "success": False,
+                    "code": "handover_locked",
+                    "error": f"Task is under manual takeover by '{owner}'.",
+                }
+            )
+
+        pause_event = _ensure_pause_event(matched_id)
+        if not pause_event.is_set():
+            return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task already paused by {task.last_operator or actor}"})
+
+        pause_event.clear()
+        await task_store.update_status(matched_id, TaskStatus.PAUSED)
+        await task_store.update_handover(matched_id, operator=actor, action="pause", note=note)
+        return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task pause requested by {actor}"})
+
+    async def _task_resume_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
+        """Implementation of cooperative task resume."""
+        import json
+
+        task_store = get_task_store()
+        matched_id = _match_running_task_id(task_id)
+        if not matched_id:
+            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+
+        actor = _normalize_operator(operator)
+        task = await task_store.get_task(matched_id)
+        if task:
+            owner = _handover_lock_owner(task, actor)
+            if owner:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "code": "handover_locked",
+                        "error": f"Task is under manual takeover by '{owner}'.",
+                    }
+                )
+
+        pause_event = _pause_events.get(matched_id)
+        if not pause_event:
+            return json.dumps({"success": False, "error": "Task does not support pause/resume"})
+
+        if pause_event.is_set():
+            return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task already running"})
+
+        pause_event.set()
+        await task_store.update_status(matched_id, TaskStatus.RUNNING)
+        await task_store.update_handover(matched_id, operator=actor, action="resume", note=note)
+        return json.dumps({"success": True, "task_id": matched_id[:8], "message": f"Task resumed by {actor}"})
+
     @server.tool()
-    async def task_cancel(task_id: str) -> str:
+    async def task_cancel(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """
         Cancel a running browser agent or research task.
 
@@ -840,28 +1423,33 @@ def serve() -> FastMCP:
         Returns:
             JSON with success status and message
         """
-        import json
+        return await _task_cancel_impl(task_id, operator=operator, note=note)
 
-        task_store = get_task_store()
+    @server.tool()
+    async def task_pause(task_id: str) -> str:
+        """
+        Pause a running browser task at the next safe checkpoint.
 
-        # Find by prefix match
-        matched_id = None
-        for full_id in _running_tasks:
-            if full_id.startswith(task_id) or full_id == task_id:
-                matched_id = full_id
-                break
+        Args:
+            task_id: Task ID (full or prefix match)
 
-        if not matched_id:
-            return json.dumps({"success": False, "error": f"Task '{task_id}' not found or not running"})
+        Returns:
+            JSON with success status and message
+        """
+        return await _task_pause_impl(task_id)
 
-        # Cancel the asyncio task
-        task = _running_tasks[matched_id]
-        task.cancel()
+    @server.tool()
+    async def task_resume(task_id: str) -> str:
+        """
+        Resume a paused browser task.
 
-        # Update status in store
-        await task_store.update_status(matched_id, TaskStatus.CANCELLED, error="Cancelled by user")
+        Args:
+            task_id: Task ID (full or prefix match)
 
-        return json.dumps({"success": True, "task_id": matched_id[:8], "message": "Task cancelled"})
+        Returns:
+            JSON with success status and message
+        """
+        return await _task_resume_impl(task_id)
 
     # --- Web Viewer UI ---
     @server.custom_route(path="/", methods=["GET"])
@@ -940,6 +1528,38 @@ def serve() -> FastMCP:
             return JSONResponse({"error": result}, status_code=404)
 
         return JSONResponse(json.loads(result))
+
+    @server.custom_route(path="/api/tasks/{task_id}/pause", methods=["POST"])
+    async def api_task_pause(request):
+        """REST endpoint to pause a running task."""
+        import json
+
+        from starlette.responses import JSONResponse
+
+        task_id = request.path_params["task_id"]
+        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        operator = payload.get("operator") if isinstance(payload, dict) else None
+        note = payload.get("note") if isinstance(payload, dict) else None
+        result = await _task_pause_impl(task_id, operator=operator, note=note)
+        data = json.loads(result)
+        status_code = 200 if data.get("success") else 409
+        return JSONResponse(data, status_code=status_code)
+
+    @server.custom_route(path="/api/tasks/{task_id}/resume", methods=["POST"])
+    async def api_task_resume(request):
+        """REST endpoint to resume a paused task."""
+        import json
+
+        from starlette.responses import JSONResponse
+
+        task_id = request.path_params["task_id"]
+        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        operator = payload.get("operator") if isinstance(payload, dict) else None
+        note = payload.get("note") if isinstance(payload, dict) else None
+        result = await _task_resume_impl(task_id, operator=operator, note=note)
+        data = json.loads(result)
+        status_code = 200 if data.get("success") else 409
+        return JSONResponse(data, status_code=status_code)
 
     # REST API endpoints for skills
     def _get_skill_store() -> SkillStore | None:
@@ -1101,9 +1721,11 @@ def serve() -> FastMCP:
                     llm=llm,
                     browser_profile=profile,
                     max_steps=settings.agent.max_steps,
+                    register_new_step_callback=lambda state, output, step_num: _wait_if_paused(task_id, task_store),
                 )
 
                 # Register for cancellation
+                _ensure_pause_event(task_id)
                 agent_task = asyncio.create_task(agent.run())
                 _running_tasks[task_id] = agent_task
 
@@ -1130,6 +1752,7 @@ def serve() -> FastMCP:
 
             finally:
                 clear_task_context()
+                _clear_pause_event(task_id)
 
         # Start background task and keep reference to prevent garbage collection
         bg_task = asyncio.create_task(execute_skill())
@@ -1220,6 +1843,7 @@ def serve() -> FastMCP:
                     llm=llm,
                     browser_profile=profile,
                     max_steps=settings.agent.max_steps,
+                    register_new_step_callback=lambda state, output, step_num: _wait_if_paused(task_id, task_store),
                 )
 
                 # Attach recorder to CDP
@@ -1228,6 +1852,7 @@ def serve() -> FastMCP:
                 recorder_attached = True
 
                 # Register for cancellation
+                _ensure_pause_event(task_id)
                 agent_task = asyncio.create_task(agent.run())
                 _running_tasks[task_id] = agent_task
 
@@ -1278,6 +1903,7 @@ def serve() -> FastMCP:
 
             finally:
                 clear_task_context()
+                _clear_pause_event(task_id)
 
         # Start background task and keep reference to prevent garbage collection
         bg_task = asyncio.create_task(execute_learn())
