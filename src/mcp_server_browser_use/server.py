@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -80,6 +81,12 @@ from fastmcp import FastMCP
 from fastmcp.dependencies import CurrentContext, Progress
 from fastmcp.server.context import Context
 from fastmcp.server.tasks.config import TaskConfig
+
+# Anti-detection utilities
+from mcp_server_browser_use.anti_detect.stealth import (
+    get_chrome_stealth_args,
+    inject_stealth_scripts,
+)
 
 # Web search utilities
 from mcp_server_browser_utils.search import (
@@ -218,7 +225,10 @@ def serve() -> FastMCP:
         return llm, profile
 
     def _get_llm_and_profile_for_web_tools():
-        """t3: Helper with browser pool support for web_search/web_fetch."""
+        """t3: Helper with browser pool support for web_search/web_fetch.
+
+        Includes stealth anti-detection features when enabled in settings.
+        """
         if _web_tools_semaphore is None:
             raise RuntimeError("Web tools not initialized")
 
@@ -238,16 +248,63 @@ def serve() -> FastMCP:
         # t3: Get next browser URL from pool
         cdp_url = _get_browser_pool_url() or settings.browser.cdp_url
 
+        # Stealth: Add anti-detection Chrome arguments
+        args_list = []
+        if settings.stealth.enabled:
+            args_list.extend(get_chrome_stealth_args())
+            logger.info(f"Stealth mode enabled with {len(args_list)} Chrome args")
+
+        # Determine user_data_dir: prefer stealth config, fall back to browser config
+        user_data_dir = settings.stealth.user_data_dir or settings.browser.user_data_dir
+        if user_data_dir and settings.stealth.enabled:
+            logger.info(f"Using persistent profile: {user_data_dir}")
+
         profile = BrowserProfile(
             headless=settings.browser.headless,
             proxy=proxy,
             cdp_url=cdp_url,
-            user_data_dir=settings.browser.user_data_dir,
+            user_data_dir=user_data_dir,
             chromium_sandbox=settings.browser.chromium_sandbox,
+            args=args_list or [],  # Pass empty list if stealth is disabled
         )
         if cdp_url:
             logger.info(f"Using browser pool CDP: {cdp_url}")
         return llm, profile
+
+    async def _apply_mouse_movement(session: "BrowserSession") -> None:
+        """Simulate natural mouse movement via CDP Input.dispatchMouseEvent.
+
+        Uses the browser-use session's internal CDP connection directly,
+        avoiding the need to create a separate playwright session.
+        This helps avoid bot detection patterns by adding human-like interaction noise.
+        """
+        try:
+            cdp_session = await session.get_or_create_cdp_session()
+            cdp_client = cdp_session.cdp_client
+
+            # Generate random mouse movements (3-5 small movements)
+            num_movements = random.randint(3, 5)
+            for _ in range(num_movements):
+                # Random position within typical viewport
+                x = random.randint(50, 1850)
+                y = random.randint(50, 950)
+
+                await cdp_client.send.Input.dispatchMouseEvent(
+                    params={
+                        "type": "mouseMoved",
+                        "x": x,
+                        "y": y,
+                        "button": "none",
+                        "clickCount": 0,
+                    },
+                    session_id=cdp_session.session_id,
+                )
+                await asyncio.sleep(random.uniform(0.05, 0.15))
+
+            logger.debug(f"Applied {num_movements} mouse movements via CDP")
+        except Exception as e:
+            logger.debug(f"Mouse movement simulation failed: {e}")
+            # Don't raise - mouse movement is a nice-to-have, not critical
 
     @server.tool(task=TaskConfig(mode="optional"))
     async def run_browser_agent(
@@ -858,7 +915,7 @@ def serve() -> FastMCP:
         task_logger.info("task_created", query_preview=query[:100])
 
         try:
-            llm, profile = _get_llm_and_profile()
+            llm, profile = _get_llm_and_profile_for_web_tools()
         except LLMProviderError as e:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
@@ -892,10 +949,31 @@ def serve() -> FastMCP:
             browser_session = BrowserSession(browser_profile=profile)
             await browser_session.start()
 
+            # Anti-detection: Inject stealth scripts if enabled
+            if settings.stealth.enabled:
+                try:
+                    await inject_stealth_scripts(browser_session)
+                    logger.debug("Stealth scripts injected for web_search")
+                except Exception as stealth_err:
+                    logger.warning(f"Failed to inject stealth scripts for web_search: {stealth_err}")
+
             all_results = []
 
             try:
                 for i, search_query in enumerate(search_queries, 1):
+                    # Anti-detection: Add random delay between searches
+                    if i > 1:  # Don't delay before the first search
+                        delay = random.uniform(settings.stealth.random_delay_min, settings.stealth.random_delay_max)
+                        logger.debug(f"Random delay before search {i}: {delay:.2f}s")
+                        await asyncio.sleep(delay)
+
+                    # Anti-detection: Simulate mouse movement before navigation
+                    if settings.stealth.mouse_movement_enabled:
+                        try:
+                            await _apply_mouse_movement(browser_session)
+                        except Exception as mouse_err:
+                            logger.debug(f"Mouse movement failed for search {i}: {mouse_err}")
+
                     await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query}")
                     logger.info(f"Executing Google search {i}/{len(search_queries)}: {search_query}")
 
@@ -1044,7 +1122,7 @@ def serve() -> FastMCP:
 
         try:
             # t3: Use browser pool profile
-            llm, profile = _get_llm_and_profile_for_web_tools()
+            _llm, profile = _get_llm_and_profile_for_web_tools()
         except LLMProviderError as e:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
@@ -1081,15 +1159,26 @@ def serve() -> FastMCP:
         browser_session = BrowserSession(browser_profile=profile)
         await browser_session.start()
 
+        # Anti-detection: Inject stealth scripts if enabled
+        if settings.stealth.enabled:
+            try:
+                await inject_stealth_scripts(browser_session)
+                logger.debug("Stealth scripts injected for web_fetch")
+            except Exception as stealth_err:
+                logger.warning(f"Failed to inject stealth scripts for web_fetch: {stealth_err}")
+
         try:
             # Navigate to page
             await ctx.info(f"Navigating to: {url[:80]}...")
             await browser_session.navigate_to(url)
 
-            # Wait a moment for page to render
+            # Wait a moment for page to render (with randomized delay)
             import asyncio as _asyncio
+            import random
 
-            await _asyncio.sleep(1)
+            render_delay = random.uniform(1.0, 3.0)
+            logger.debug(f"Random render delay for web_fetch: {render_delay:.2f}s")
+            await _asyncio.sleep(render_delay)
 
             await ctx.info(f"Extracting content as {output_format}...")
 

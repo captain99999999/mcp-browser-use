@@ -1,0 +1,185 @@
+plan_id: 20260621-anti-detection-mcp
+objective: "为 web_search 和 web_fetch 工具增加反 Google 机器人检测能力"
+status: in_progress
+created_at: 2026-06-21T10:00:00+08:00
+updated_at: 2026-06-21T10:00:00+08:00
+
+branch: fev
+base_commit: "HEAD of fev (to be determined)"
+
+integration_branch: null  # 本任务不含集成评审，由用户直接验收
+
+metadata:
+  complexity: MEDIUM
+  persistence_path: "docs/plan/20260621-anti-detection-mcp/"
+  persistence_reason: "项目根目录存在，正常落盘路径"
+  
+  # 用户决策记录（来自 askQuestions 用户委托自主决策）
+  user_decisions:
+    user_data_dir: "D:\\browser-projects\\mcp-browser-use\\profiles\\web-tools"
+    stealth_approach: "提取 stealth JS payload + CDP 注入（因 browser-use 0.11 已弃用 Playwright 纯 CDP）"
+    config_style: "新增 stealth 配置节 + 默认启用"
+    deploy_strategy: "git push + ssh pull"
+
+tasks:
+  - id: t1
+    title: "创建 stealth.py 模块（提取 playwright-stealth JS payload）"
+    objective: "新建 src/mcp_server_browser_use/anti_detect/stealth.py，包含反自动化检测的 JS 脚本和注入逻辑"
+    agent: "use-browser智能体"
+    wave: 1
+    dependencies: []
+    conflicts_with: []
+    covers:
+      - "src/mcp_server_browser_use/anti_detect/__init__.py"
+      - "src/mcp_server_browser_use/anti_detect/stealth.py"
+    
+    task_definition:
+      tech_stack: ["python", "browser-use 0.11.2", "CDP"]
+      target_files:
+        - "src/mcp_server_browser_use/anti_detect/__init__.py"
+        - "src/mcp_server_browser_use/anti_detect/stealth.py"
+      minimal_change: "仅创建新模块，不修改现有逻辑（注入逻辑在 t2 中集成）"
+      acceptance_checks:
+        - "stealth.py 包含 get_stealth_scripts() 函数，返回 JS 字符串列表"
+        - "stealth.py 包含 inject_stealth_scripts(session) 函数，调用 _cdp_add_init_script()"
+        - "代码通过 ruff format 和 ruff check"
+        - "代码通过 pyright 类型检查"
+    
+    acceptance_criteria:
+      - "✅ stealth.py 文件创建在 anti_detect 目录下"
+      - "✅ get_stealth_scripts() 返回包含 navigator.webdriver、chrome.runtime、permissions 等反检测脚本的字符串列表"
+      - "✅ inject_stealth_scripts() 接收 BrowserSession 并调用其 _cdp_add_init_script() 方法"
+      - "✅ 所有函数有类型注解和 docstring"
+    
+    status: pending
+
+  - id: t2
+    title: "修改 config.py：添加 stealth 配置节"
+    objective: "在 config.py 中新增 StealthSettings 类，并集成到 AppSettings"
+    agent: "use-browser智能体"
+    wave: 1
+    dependencies: []
+    conflicts_with: []
+    covers:
+      - "src/mcp_server_browser_use/config.py"
+    
+    task_definition:
+      tech_stack: ["pydantic-settings"]
+      target_files:
+        - "src/mcp_server_browser_use/config.py"
+      minimal_change: "新增 StealthSettings 类 + 在 AppSettings 中注册"
+      acceptance_checks:
+        - "配置类定义正确，支持环境变量 MCP_STEALTH_*"
+        - "默认值：enabled=True, user_data_dir=D:\\browser-projects\\mcp-browser-use\\profiles\\web-tools"
+        - "代码通过 ruff format 和 ruff check"
+    
+    acceptance_criteria:
+      - "✅ StealthSettings 类定义，包含 enabled: bool (default=True)"
+      - "✅ user_data_dir: str | None (default=D:\\browser-projects\\mcp-browser-use\\profiles\\web-tools)"
+      - "✅ 集成到 AppSettings.stealth 字段"
+    
+    status: pending
+
+  - id: t3
+    title: "修改 server.py：集成 stealth + 延迟随机化 + 鼠标移动"
+    objective: "在 web_search 和 web_fetch 中注入反检测逻辑"
+    agent: "use-browser智能体"
+    wave: 1
+    dependencies: [t1, t2]
+    conflicts_with: []
+    covers:
+      - "src/mcp_server_browser_use/server.py"
+    
+    task_definition:
+      tech_stack: ["python", "asyncio", "browser-use 0.11.2"]
+      target_files:
+        - "src/mcp_server_browser_use/server.py"
+      minimal_change: "仅修改 web_search 和 web_fetch 函数，不改动其他工具"
+      acceptance_checks:
+        - "web_search 中调用 inject_stealth_scripts()"
+        - "web_search 中 asyncio.sleep() 改为随机延迟"
+        - "web_search 中导航到 Google 前添加鼠标移动"
+        - "代码通过 ruff format 和 ruff check"
+    
+    acceptance_criteria:
+      - "✅ web_search 在 browser_session.start() 后调用 inject_stealth_scripts(session)"
+      - "✅ web_search 循环中 asyncio.sleep(1.5) 改为 asyncio.sleep(1.5 + random.uniform(0, 2))"
+      - "✅ web_search 导航到 Google 前调用随机鼠标移动函数（通过 CDP Input.dispatchMouseEvent）"
+      - "✅ web_fetch 同样集成 stealth + 延迟随机化（但鼠标移动可选，因 web_fetch 访问目标 URL 非 Google）"
+    
+    status: pending
+
+  - id: t4
+    title: "更新 pyproject.toml：添加依赖说明"
+    objective: "在 dependencies 中添加注释，说明 stealth 模块的实现方式"
+    agent: "use-browser智能体"
+    wave: 1
+    dependencies: []
+    conflicts_with: []
+    covers:
+      - "pyproject.toml"
+    
+    task_definition:
+      tech_stack: ["python", "hatch"]
+      target_files:
+        - "pyproject.toml"
+      minimal_change: "仅添加注释"
+      acceptance_checks:
+        - "无新依赖添加（stealth JS payload 从 playwright-stealth 提取，不依赖其 Python 包）"
+        - "注释说明 stealth 模块的来源和实现方式"
+    
+    acceptance_criteria:
+      - "✅ pyproject.toml 中添加注释说明 stealth 实现方式"
+      - "✅ 无需安装新依赖"
+    
+    status: pending
+
+  - id: t5
+    title: "创建 docs/design/anti-detection.md：技术文档"
+    objective: "记录反检测方案的设计决策和实现细节"
+    agent: "use-browser智能体"
+    wave: 1
+    dependencies: [t1, t2, t3, t4]
+    conflicts_with: []
+    covers:
+      - "docs/design/anti-detection.md"
+    
+    task_definition:
+      tech_stack: ["markdown"]
+      target_files:
+        - "docs/design/anti-detection.md"
+      minimal_change: "创建新文档"
+      acceptance_checks:
+        - "文档包含：问题背景、方案设计、API 确认结果、配置说明、测试建议"
+    
+    acceptance_criteria:
+      - "✅ 文档说明为什么选择 CDP 注入而非 playwright-stealth 包"
+      - "✅ 文档包含配置项说明（stealth.enabled, stealth.user_data_dir）"
+      - "✅ 文档包含手动测试步骤"
+    
+    status: pending
+
+wave_plan:
+  Wave 1 (parallel):
+    - t1: 创建 stealth.py
+    - t2: 修改 config.py
+  Sequential (depends on t1, t2):
+    - t3: 修改 server.py
+    - t4: 更新 pyproject.toml
+    - t5: 创建文档
+
+risk_assessment:
+  known_risks:
+    - severity: low
+      description: "_cdp_add_init_script() 是 browser-use 的内部 API，升级可能导致破坏"
+      mitigation: "在文档中记录该依赖，未来升级时需验证"
+    - severity: medium
+      description: "stealth JS payload 可能无法完全绕过 Google 的高级检测"
+      mitigation: "用户需要配合 profile 持久化（Cookie/历史）+ 随机延迟 + 鼠标移动多重策略"
+    - severity: low
+      description: "winserver 的 D:\\browser-projects\\路径可能不存在"
+      mitigation: "配置中说明路径，部署前需手动创建目录"
+
+  unknowns:
+    - "Google 是否有更新的检测机制（如 reCAPTCHA v3）"
+    - "Chrome Headless 模式下 stealth 脚本的有效性"

@@ -92,6 +92,9 @@ class TestListTools:
         assert "skill_list" in tool_names
         assert "skill_get" in tool_names
         assert "skill_delete" in tool_names
+        # Fork-specific web tools
+        assert "web_search" in tool_names
+        assert "web_fetch" in tool_names
         # Observability tools
         assert "health_check" in tool_names
         assert "task_list" in tool_names
@@ -99,7 +102,7 @@ class TestListTools:
         assert "task_cancel" in tool_names
         assert "task_pause" in tool_names
         assert "task_resume" in tool_names
-        assert len(tool_names) == 11
+        assert len(tool_names) == 13
 
     @pytest.mark.anyio
     async def test_list_tools_skills_disabled(self, client_skills_disabled: Client):
@@ -110,6 +113,9 @@ class TestListTools:
         # Core browser automation tools should be present
         assert "run_browser_agent" in tool_names
         assert "run_deep_research" in tool_names
+        # Fork-specific web tools
+        assert "web_search" in tool_names
+        assert "web_fetch" in tool_names
         # Observability tools should be present
         assert "health_check" in tool_names
         assert "task_list" in tool_names
@@ -121,7 +127,7 @@ class TestListTools:
         assert "skill_list" not in tool_names
         assert "skill_get" not in tool_names
         assert "skill_delete" not in tool_names
-        assert len(tool_names) == 8
+        assert len(tool_names) == 10
 
     @pytest.mark.anyio
     async def test_run_browser_agent_tool_schema(self, client: Client):
