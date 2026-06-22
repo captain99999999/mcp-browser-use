@@ -147,6 +147,37 @@ class TestListTools:
         assert tool.description is not None
         assert "topic" in str(tool.inputSchema)
 
+    @pytest.mark.anyio
+    async def test_web_search_tool_schema(self, client: Client):
+        """web_search tool should have query, max_results, max_queries params."""
+        tools = await client.list_tools()
+        tool = next(t for t in tools if t.name == "web_search")
+
+        assert tool.description is not None
+        schema_str = str(tool.inputSchema)
+        assert "query" in schema_str
+        assert "max_results" in schema_str
+        assert "max_queries" in schema_str
+
+    @pytest.mark.anyio
+    async def test_web_fetch_tool_schema(self, client: Client):
+        """web_fetch tool should have url and output_format params."""
+        tools = await client.list_tools()
+        tool = next(t for t in tools if t.name == "web_fetch")
+
+        assert tool.description is not None
+        schema_str = str(tool.inputSchema)
+        assert "url" in schema_str
+        assert "output_format" in schema_str
+
+    @pytest.mark.anyio
+    async def test_health_check_tool_schema(self, client: Client):
+        """health_check tool should be present and have a description."""
+        tools = await client.list_tools()
+        tool = next(t for t in tools if t.name == "health_check")
+
+        assert tool.description is not None
+
 
 class TestRunBrowserAgent:
     """Test the run_browser_agent tool."""

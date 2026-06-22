@@ -220,6 +220,30 @@ def status() -> None:
         raise typer.Exit(1)
 
 
+def _tail_log(lines: int = 50, *, follow: bool = False) -> None:
+    """Read last *lines* lines of the server log; optionally follow."""
+    import time as _time
+
+    with open(LOG_FILE, encoding="utf-8", errors="replace") as fh:
+        all_lines = fh.readlines()
+        last_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        for line in last_lines:
+            print(line, end="")
+
+        if not follow:
+            return
+
+        fh.seek(0, 2)
+        while True:
+            where = fh.tell()
+            line = fh.readline()
+            if line:
+                print(line, end="")
+            else:
+                _time.sleep(0.5)
+                fh.seek(where)
+
+
 @app.command()
 def logs(
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output"),
@@ -231,13 +255,9 @@ def logs(
         raise typer.Exit(1)
 
     if follow:
-        import subprocess
-
-        subprocess.run(["tail", "-f", str(LOG_FILE)], check=False)
+        _tail_log(lines=lines, follow=True)
     else:
-        import subprocess
-
-        subprocess.run(["tail", "-n", str(lines), str(LOG_FILE)], check=False)
+        _tail_log(lines=lines, follow=False)
 
 
 # --- MCP Client Commands ---

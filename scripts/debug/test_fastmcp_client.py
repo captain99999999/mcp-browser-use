@@ -43,7 +43,7 @@ async def test_connection():
             content = result.content[0].text if result.content else ""
             print("✅ web_search 成功\n")
             print(f"响应长度: {len(content)} 字符")
-            print(f"响应预览（前200字符）:\n{content[:200]}...\n")
+            print(f"响应预览 (前200字符):\n{content[:200]}...\n")
 
             return True
 

@@ -897,7 +897,7 @@ This section links to the in-repo development guides. Read these before contribu
 |---|---|
 | [AGENTS.md](AGENTS.md) | Required workflow for LLM-driven engineering agents: lint, format, type-check, test commands; coding standards; testing patterns; CI fix order |
 | [.github/copilot-instructions.md](.github/copilot-instructions.md) | Fork-specific instructions: branch strategy (`fev` vs `main`), Handover Lock customization, upstream sync procedure |
-| [FASTMCP_PREVENTION_STRATEGIES.md](FASTMCP_PREVENTION_STRATEGIES.md) | FastMCP-specific gotchas and patterns (HTTP transport, context propagation, streaming) |
+| [docs/FASTMCP_PREVENTION_STRATEGIES.md](docs/FASTMCP_PREVENTION_STRATEGIES.md) | FastMCP-specific gotchas and patterns (HTTP transport, context propagation, streaming) |
 
 ### Local quick reference
 
@@ -927,7 +927,7 @@ mcp-browser-use/                 # this repo (fork of Saik0s/mcp-browser-use)
 ├── AGENTS.md                    # ← dev workflow (read first)
 ├── .github/
 │   └── copilot-instructions.md  # ← fork-specific instructions
-└── FASTMCP_PREVENTION_STRATEGIES.md
+└── docs/FASTMCP_PREVENTION_STRATEGIES.md
 ```
 
 > Local scripts under `test_*.py` or `*_local.py` are untracked on purpose — never commit API keys or environment-specific paths.

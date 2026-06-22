@@ -9,6 +9,7 @@ from mcp_server_browser_use.config import (
     NO_KEY_PROVIDERS,
     STANDARD_ENV_VAR_NAMES,
     LLMSettings,
+    StealthSettings,
 )
 
 
@@ -228,3 +229,55 @@ class TestProviderTypeValidation:
             monkeypatch.setenv("MCP_LLM_PROVIDER", provider)
             settings = LLMSettings()
             assert settings.provider == provider
+
+
+class TestStealthSettings:
+    """Test anti-detection StealthSettings defaults and env var overrides."""
+
+    @pytest.fixture(autouse=True)
+    def clean_env(self, monkeypatch):
+        """Remove MCP_STEALTH_ env vars before each test."""
+        for var in list(os.environ.keys()):
+            if var.startswith("MCP_STEALTH_"):
+                monkeypatch.delenv(var, raising=False)
+
+    def test_stealth_enabled_by_default(self):
+        """Stealth mode should be enabled by default."""
+        s = StealthSettings()
+        assert s.enabled is True
+
+    def test_stealth_can_be_disabled(self, monkeypatch):
+        """Stealth mode should be toggleable via env var."""
+        monkeypatch.setenv("MCP_STEALTH_ENABLED", "false")
+        s = StealthSettings()
+        assert s.enabled is False
+
+    def test_default_delay_range(self):
+        """Default random delay range should be 1.5-3.5s."""
+        s = StealthSettings()
+        assert s.random_delay_min == 1.5
+        assert s.random_delay_max == 3.5
+
+    def test_custom_delay_range(self, monkeypatch):
+        """Delay range should be configurable via env."""
+        monkeypatch.setenv("MCP_STEALTH_RANDOM_DELAY_MIN", "2.0")
+        monkeypatch.setenv("MCP_STEALTH_RANDOM_DELAY_MAX", "5.0")
+        s = StealthSettings()
+        assert s.random_delay_min == 2.0
+        assert s.random_delay_max == 5.0
+
+    def test_mouse_movement_enabled_by_default(self):
+        """Mouse movement should be enabled by default."""
+        s = StealthSettings()
+        assert s.mouse_movement_enabled is True
+
+    def test_user_data_dir_default_none(self):
+        """user_data_dir should default to None."""
+        s = StealthSettings()
+        assert s.user_data_dir is None
+
+    def test_user_data_dir_configurable(self, monkeypatch):
+        """user_data_dir should be configurable via env."""
+        monkeypatch.setenv("MCP_STEALTH_USER_DATA_DIR", "/tmp/chrome-profile")
+        s = StealthSettings()
+        assert s.user_data_dir == "/tmp/chrome-profile"

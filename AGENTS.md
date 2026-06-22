@@ -27,7 +27,7 @@ uv run pytest              # Run tests
 | Path | Purpose |
 |------|---------|
 | `src/mcp_server_browser_use/` | Library source code |
-| `├─ server.py` | FastMCP server + MCP tools |
+| `├─ server.py` | FastMCP server + 13 MCP tools |
 | `├─ cli.py` | Typer CLI for daemon management |
 | `├─ config.py` | Pydantic settings |
 | `├─ observability/` | Task tracking (SQLite persistence) |
@@ -39,7 +39,7 @@ uv run pytest              # Run tests
 | `scripts/` | Operational scripts |
 | `├─ debug/` | Ad-hoc diagnostic scripts (winserver probes, one-off checks) |
 | `docs/` | Design documents |
-| `plans/` | Architecture and implementation plans |
+| `docs/plan/` | Architecture and implementation plans |
 | `skills/` | Browser automation skill definitions |
 
 ## Core MCP Tools
@@ -48,9 +48,12 @@ uv run pytest              # Run tests
 |------|---------|----------|
 | `run_browser_agent` | Execute browser automation | 60-120s |
 | `run_deep_research` | Multi-search research | 2-5 min |
+| `web_search` | Google search via browser | 30-90s |
+| `web_fetch` | Fetch page content (JS-rendered) | 10-30s |
 | `skill_list/get/delete` | Skill management | <1s |
 | `health_check` | Server status | <1s |
 | `task_list/get/cancel` | Task management | <1s |
+| `task_pause/resume` | Handover Lock (pause/resume tasks) | <1s |
 
 ## Writing Code
 

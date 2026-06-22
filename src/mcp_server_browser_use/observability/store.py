@@ -342,9 +342,9 @@ class TaskStore:
             cursor = await db.execute(
                 """
                 DELETE FROM tasks
-                WHERE created_at < ? AND status IN (?, ?, ?)
+                WHERE created_at < ? AND status IN (?, ?, ?, ?)
             """,
-                (cutoff, TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value),
+                (cutoff, TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value, TaskStatus.PAUSED.value),
             )
             await db.commit()
             return cursor.rowcount

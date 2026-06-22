@@ -41,7 +41,7 @@ scripts/                           # operational scripts
 ├── debug/                         # ad-hoc diagnostic scripts (never in project root)
 docs/                              # design notes
 AGENTS.md                          # full dev guidelines
-FASTMCP_PREVENTION_STRATEGIES.md   # FastMCP-specific gotchas
+docs/FASTMCP_PREVENTION_STRATEGIES.md   # FastMCP-specific gotchas
 ```
 
 ## Build & validate
@@ -80,4 +80,4 @@ E2E tests (`tests/integration_tests/test_web_tools.py` and similar) require:
 - Fork-specific workflow, deployment, upstream sync → [copilot-instructions.md](copilot-instructions.md)
 - Coding standards, test patterns, CI fix order → [AGENTS.md](../AGENTS.md)
 - User-facing docs → [README.md](../README.md)
-- FastMCP gotchas → [FASTMCP_PREVENTION_STRATEGIES.md](../FASTMCP_PREVENTION_STRATEGIES.md)
+- FastMCP gotchas → [docs/FASTMCP_PREVENTION_STRATEGIES.md](../docs/FASTMCP_PREVENTION_STRATEGIES.md)

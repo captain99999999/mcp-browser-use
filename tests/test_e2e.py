@@ -49,6 +49,7 @@ def get_api_key(provider: str) -> str | None:
         "google": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "MCP_LLM_GOOGLE_API_KEY"],
         "openrouter": ["OPENROUTER_API_KEY", "MCP_LLM_OPENROUTER_API_KEY"],
         "groq": ["GROQ_API_KEY", "MCP_LLM_GROQ_API_KEY"],
+        "deepseek": ["DEEPSEEK_API_KEY", "MCP_LLM_DEEPSEEK_API_KEY"],
     }
     for var in env_vars.get(provider, []):
         key = os.environ.get(var)

@@ -156,9 +156,18 @@ class TestErrorHandling:
             get_llm("openai", "gpt-4")
 
     def test_missing_api_key_error_message_includes_env_var(self):
-        """Error message should include the standard env var name."""
+        """Error message should include the standard env var name for the provider."""
         with pytest.raises(LLMProviderError, match="OPENAI_API_KEY"):
             get_llm("openai", "gpt-4")
+
+        with pytest.raises(LLMProviderError, match="ANTHROPIC_API_KEY"):
+            get_llm("anthropic", "claude-sonnet-4-20250514")
+
+        with pytest.raises(LLMProviderError, match="DEEPSEEK_API_KEY"):
+            get_llm("deepseek", "deepseek-chat")
+
+        with pytest.raises(LLMProviderError, match="GEMINI_API_KEY"):
+            get_llm("google", "gemini-3-flash-preview")
 
     def test_unsupported_provider_error(self):
         """Should raise error for unsupported provider."""
