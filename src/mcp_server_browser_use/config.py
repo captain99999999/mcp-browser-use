@@ -306,6 +306,18 @@ class SkillsSettings(BaseSettings):
     validate_results: bool = Field(default=True, description="Validate execution results against skill success indicators")
 
 
+class StealthSettings(BaseSettings):
+    """Anti-detection configuration for web_search and web_fetch tools."""
+
+    model_config = SettingsConfigDict(env_prefix="MCP_STEALTH_")
+
+    enabled: bool = Field(default=True, description="Enable stealth mode for web tools")
+    user_data_dir: str | None = Field(default=None, description="Chrome user data directory for persistent profiles")
+    random_delay_min: float = Field(default=1.5, description="Minimum random delay in seconds")
+    random_delay_max: float = Field(default=3.5, description="Maximum random delay in seconds")
+    mouse_movement_enabled: bool = Field(default=True, description="Enable random mouse movements")
+
+
 class AppSettings(BaseSettings):
     """Root application settings.
 
@@ -321,6 +333,7 @@ class AppSettings(BaseSettings):
     research: ResearchSettings = Field(default_factory=ResearchSettings)
     skills: SkillsSettings = Field(default_factory=SkillsSettings)
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
+    stealth: StealthSettings = Field(default_factory=StealthSettings)
 
     def save(self) -> Path:
         """Save current configuration to file (excluding secrets)."""
