@@ -10,7 +10,7 @@
     "editable": ["."]
   },
   "deployment": {
-    "transport": "stdio",
+    "transport": "streamable-http",
     "log_level": "INFO"
   }
 }

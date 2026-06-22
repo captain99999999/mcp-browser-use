@@ -1,12 +1,10 @@
-"""Web search utilities using LLM-optimized queries and DuckDuckGo API."""
+"""Web search utilities using LLM-optimized queries."""
 
 import json
 import logging
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
-import httpx
 
 if TYPE_CHECKING:
     from browser_use.llm.base import BaseChatModel
@@ -16,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchResult:
-    """Single search result from DuckDuckGo API."""
+    """Single search result."""
 
     title: str
     url: str
@@ -98,84 +96,6 @@ Return ONLY a JSON array of {max_queries} search query strings."""
         return [topic]
 
 
-async def search_duckduckgo(query: str, max_results: int = 10, timeout: float = 10.0, proxy: str | None = None) -> list[SearchResult]:
-    """Search using DuckDuckGo Instant Answer API.
-
-    Args:
-        query: Search query string
-        max_results: Maximum number of results to return
-        timeout: Request timeout in seconds
-        proxy: Optional proxy URL (e.g., http://127.0.0.1:7897)
-
-    Returns:
-        List of SearchResult objects
-    """
-    import os
-
-    proxy_url = proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("MCP_PROXY")
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout, proxy=proxy_url, follow_redirects=True) as client:
-            response = await client.get(
-                DUCKDUCKGO_API_URL,
-                params={"q": query, "format": "json"},
-            )
-            # DuckDuckGo returns 202 for some queries (still contains valid data)
-            if response.status_code not in (200, 202):
-                response.raise_for_status()
-            data = response.json()
-
-            # Parse DuckDuckGo response format
-            results = []
-
-            # Primary source: RelatedTopics
-            if "RelatedTopics" in data:
-                for topic in data["RelatedTopics"][:max_results]:
-                    first_url = topic.get("FirstURL")
-                    text = topic.get("Text")
-                    if first_url and text:
-                        results.append(
-                            SearchResult(
-                                title=text.split(" - ")[0] if " - " in text else text,
-                                url=first_url,
-                                snippet=topic.get("Result", "") or text,
-                            )
-                        )
-
-            # Secondary source: Results field (sometimes returned instead of RelatedTopics)
-            if "Results" in data and not results:
-                for item in data["Results"][:max_results]:
-                    url = item.get("FirstURL") or item.get("Icon", {}).get("URL", "")
-                    text = item.get("Text", "")
-                    if url and text:
-                        results.append(
-                            SearchResult(
-                                title=text.split(" - ")[0] if " - " in text else text,
-                                url=url,
-                                snippet=item.get("Result", "") or text,
-                            )
-                        )
-
-            # Fallback to AbstractText if no structured results
-            if not results and "AbstractText" in data:
-                abstract = data.get("AbstractText", "")
-                abstract_url = data.get("AbstractURL", "")
-                if abstract and abstract_url:
-                    results.append(SearchResult(title="DuckDuckGo Result", url=abstract_url, snippet=abstract))
-
-            return results
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error searching DuckDuckGo: {e}")
-        raise
-    except httpx.RequestError as e:
-        logger.error(f"Network error searching DuckDuckGo: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Error searching DuckDuckGo: {e}")
-        raise
-
-
 def deduplicate_results(results: list[SearchResult]) -> list[SearchResult]:
     """Remove duplicate search results by URL.
 
@@ -196,17 +116,4 @@ def deduplicate_results(results: list[SearchResult]) -> list[SearchResult]:
     return unique_results
 
 
-def as_dict(result: SearchResult) -> dict:
-    """Convert SearchResult to dictionary.
-
-    Args:
-        result: SearchResult object
-
-    Returns:
-        Dictionary representation
-    """
-    return {
-        "title": result.title,
-        "url": result.url,
-        "snippet": result.snippet,
-    }
+# DUCKDUCKGO_API_URL kept for future reference; not currently used by the server.

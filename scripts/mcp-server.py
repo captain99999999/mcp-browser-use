@@ -263,6 +263,76 @@ async def task_cancel(task_id: str) -> str:
     return await _forward_tool_call("task_cancel", {"task_id": task_id})
 
 
+@mcp.tool()
+async def task_pause(task_id: str, operator: str | None = None, note: str | None = None) -> str:
+    """
+    Pause a running browser task at the next safe checkpoint.
+
+    Args:
+        task_id: Task ID (full or prefix match)
+        operator: Name of the operator pausing the task
+        note: Optional note about why the task is paused
+
+    Returns:
+        JSON with success status and message
+    """
+    return await _forward_tool_call("task_pause", {"task_id": task_id, "operator": operator, "note": note})
+
+
+@mcp.tool()
+async def task_resume(task_id: str, operator: str | None = None, note: str | None = None) -> str:
+    """
+    Resume a paused browser task.
+
+    Args:
+        task_id: Task ID (full or prefix match)
+        operator: Name of the operator resuming the task
+        note: Optional note about why the task is resumed
+
+    Returns:
+        JSON with success status and message
+    """
+    return await _forward_tool_call("task_resume", {"task_id": task_id, "operator": operator, "note": note})
+
+
+@mcp.tool()
+async def web_search(
+    query: str,
+    max_results: int = 10,
+    max_queries: int = 3,
+) -> str:
+    """
+    Search the web using Google and browser-based HTML parsing.
+
+    Args:
+        query: Search query or question
+        max_results: Maximum number of results to return (default 10)
+        max_queries: Number of search queries to generate (default 3)
+
+    Returns:
+        JSON array of search results with title, url, and snippet
+    """
+    return await _forward_tool_call("web_search", {"query": query, "max_results": max_results, "max_queries": max_queries})
+
+
+@mcp.tool()
+async def web_fetch(
+    url: str,
+    output_format: str = "html",
+) -> str:
+    """
+    Fetch and return content from a web page using browser rendering.
+
+    Args:
+        url: The URL to fetch (HTTP/HTTPS required)
+        output_format: Content format - "html", "text", or "screenshot"
+
+    Returns:
+        Page content as HTML, text, or base64-encoded screenshot
+    """
+    return await _forward_tool_call("web_fetch", {"url": url, "output_format": output_format})
+
+
 async def _startup_check():
     """Check daemon health on startup."""
     print("Checking HTTP daemon health...", file=sys.stderr)

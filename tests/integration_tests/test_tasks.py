@@ -152,3 +152,48 @@ class TestTaskCancel:
 
         data = json.loads(result.content[0].text)
         assert data["success"] is False
+
+
+class TestTaskPauseResume:
+    """Tests for the task_pause and task_resume tools (Handover Lock)."""
+
+    @pytest.mark.anyio
+    async def test_task_pause_nonexistent(self, mcp_client: Client):
+        """task_pause should return error for non-existent task."""
+        result = await mcp_client.call_tool("task_pause", {"task_id": "nonexistent-pause"})
+
+        data = json.loads(result.content[0].text)
+        assert data["success"] is False
+
+    @pytest.mark.anyio
+    async def test_task_pause_completed_task(self, mcp_client: Client):
+        """task_pause should not pause already completed tasks."""
+        task_store = get_task_store()
+        await task_store.initialize()
+
+        task_id = unique_id("completed-pause")
+        record = TaskRecord(task_id=task_id, tool_name="run_browser_agent", status=TaskStatus.COMPLETED)
+        await task_store.create_task(record)
+
+        result = await mcp_client.call_tool("task_pause", {"task_id": task_id})
+        data = json.loads(result.content[0].text)
+        assert data["success"] is False
+
+    @pytest.mark.anyio
+    async def test_task_resume_nonexistent(self, mcp_client: Client):
+        """task_resume should return error for non-existent task."""
+        result = await mcp_client.call_tool("task_resume", {"task_id": "nonexistent-resume"})
+
+        data = json.loads(result.content[0].text)
+        assert data["success"] is False
+
+    @pytest.mark.anyio
+    async def test_task_pause_and_resume_with_metadata(self, mcp_client: Client):
+        """task_pause and task_resume should accept operator/note parameters."""
+        result_pause = await mcp_client.call_tool("task_pause", {"task_id": "test-op", "operator": "hsd", "note": "check"})
+        data = json.loads(result_pause.content[0].text)
+        assert "success" in data
+
+        result_resume = await mcp_client.call_tool("task_resume", {"task_id": "test-op", "operator": "hsd", "note": "ok"})
+        data = json.loads(result_resume.content[0].text)
+        assert "success" in data

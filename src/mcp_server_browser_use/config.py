@@ -77,9 +77,6 @@ def _load_env_files() -> None:
         if not base.exists():
             continue
         candidates.append(base / ".env")
-        candidates.append(base / "use-browser" / ".env")
-        if base != base.parent:
-            candidates.append(base.parent / "use-browser" / ".env")
 
     seen: set[Path] = set()
     for path in candidates:
@@ -271,9 +268,6 @@ class ServerSettings(BaseSettings):
     results_dir: str | None = Field(default=None, description="Directory to save execution results")
     auth_token: SecretStr | None = Field(default=None, description="Bearer token for non-localhost access")
     max_concurrent_tasks: int = Field(default=10, description="Maximum number of concurrent browser tasks")
-    max_queued_tasks: int = Field(default=100, description="Maximum number of queued tasks")
-    alert_max_running_tasks: int = Field(default=5, description="Alert if running tasks exceed this threshold")
-    alert_failure_rate: float = Field(default=0.5, description="Alert if failure rate exceeds this threshold (0-1)")
 
 
 class ResearchSettings(BaseSettings):
@@ -283,7 +277,6 @@ class ResearchSettings(BaseSettings):
 
     max_searches: int = Field(default=5, description="Maximum number of searches per research task")
     save_directory: str | None = Field(default=None, description="Directory to save research reports")
-    search_timeout: int = Field(default=120, description="Timeout per search in seconds")
 
 
 class ToolsSettings(BaseSettings):
@@ -291,9 +284,7 @@ class ToolsSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="MCP_TOOLS_")
 
-    web_fetch_timeout: int = Field(default=60, description="Timeout for web_fetch in seconds")
     web_search_timeout: int = Field(default=120, description="Timeout for web_search in seconds")
-    search_timeout: int = Field(default=30, description="Timeout for API search in seconds")
 
 
 class SkillsSettings(BaseSettings):

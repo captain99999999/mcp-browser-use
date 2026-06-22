@@ -1,6 +1,7 @@
 """MCP server exposing browser-use as tools with native background task support."""
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -10,6 +11,13 @@ import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from starlette.responses import FileResponse, JSONResponse
+
+
+def _error_response(message: str) -> str:
+    """Return a standardized JSON error response for all tools."""
+    return json.dumps({"success": False, "error": message}, ensure_ascii=False)
 
 
 def _configure_stdio_logging() -> None:
@@ -106,6 +114,7 @@ from .utils import save_execution_result
 
 if TYPE_CHECKING:
     from browser_use.agent.views import AgentOutput
+    from browser_use.browser.session import BrowserSession
     from browser_use.browser.views import BrowserStateSummary
 
 # Apply configured log level (may override the default WARNING)
@@ -254,7 +263,9 @@ def serve() -> FastMCP:
             args_list.extend(get_chrome_stealth_args())
             logger.info(f"Stealth mode enabled with {len(args_list)} Chrome args")
 
-        # Determine user_data_dir: prefer stealth config, fall back to browser config
+        # Determine user_data_dir: stealth's own user_data_dir takes priority
+        # over the generic browser.user_data_dir (kept separate for tools that
+        # do not need anti-detection).
         user_data_dir = settings.stealth.user_data_dir or settings.browser.user_data_dir
         if user_data_dir and settings.stealth.enabled:
             logger.info(f"Using persistent profile: {user_data_dir}")
@@ -365,7 +376,7 @@ def serve() -> FastMCP:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
             clear_task_context()
-            return f"Error: {e}"
+            return _error_response(str(e))
 
         # Mark task as running
         await task_store.update_status(task_id, TaskStatus.RUNNING)
@@ -402,8 +413,6 @@ def serve() -> FastMCP:
                     if isinstance(skill_params, dict):
                         params_dict = skill_params
                     elif isinstance(skill_params, str):
-                        import json
-
                         try:
                             parsed = json.loads(skill_params)
                             if isinstance(parsed, dict):
@@ -444,8 +453,6 @@ def serve() -> FastMCP:
                                 logger.info(f"Skill direct execution succeeded: {skill.name}")
 
                                 # Format result
-                                import json
-
                                 if isinstance(run_result.data, (dict, list)):
                                     final_result = json.dumps(run_result.data, indent=2)
                                 else:
@@ -734,7 +741,7 @@ def serve() -> FastMCP:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
             clear_task_context()
-            return f"Error: {e}"
+            return _error_response(str(e))
 
         # Mark task as running
         await task_store.update_status(task_id, TaskStatus.RUNNING)
@@ -743,7 +750,7 @@ def serve() -> FastMCP:
         searches = max_searches if max_searches is not None else settings.research.max_searches
         # Sanitize topic for safe filename
         safe_topic = re.sub(r"[^\w\s-]", "", topic[:50]).strip().replace(" ", "_")
-        save_path = save_to_file or (f"{settings.research.save_directory}/{safe_topic}.md" if settings.research.save_directory else None)
+        save_path = save_to_file or (str(Path(settings.research.save_directory) / f"{safe_topic}.md") if settings.research.save_directory else None)
 
         try:
             # Execute research with progress tracking
@@ -804,8 +811,6 @@ def serve() -> FastMCP:
             Returns:
                 JSON list of skill summaries with name, description, and usage stats
             """
-            import json
-
             assert skill_store is not None  # Type narrowing for mypy
             skills = skill_store.list_all()
 
@@ -844,7 +849,7 @@ def serve() -> FastMCP:
             skill = skill_store.load(skill_name)
 
             if not skill:
-                return f"Error: Skill '{skill_name}' not found in {skill_store.directory}"
+                return _error_response(f"Skill '{skill_name}' not found")
 
             return skill_store.to_yaml(skill)
 
@@ -861,8 +866,8 @@ def serve() -> FastMCP:
             """
             assert skill_store is not None  # Type narrowing for mypy
             if skill_store.delete(skill_name):
-                return f"Skill '{skill_name}' deleted successfully"
-            return f"Error: Skill '{skill_name}' not found"
+                return json.dumps({"success": True, "message": f"Skill '{skill_name}' deleted successfully"}, ensure_ascii=False)
+            return _error_response(f"Skill '{skill_name}' not found")
 
     # --- Web Tools ---
 
@@ -890,12 +895,9 @@ def serve() -> FastMCP:
         Returns:
             JSON array of search results with title, url, and snippet
         """
-        # t5: Concurrency control for web_search
-        async with _web_tools_semaphore:
-            import json
-            from urllib.parse import quote_plus
+        from urllib.parse import quote_plus
 
-            from bs4 import BeautifulSoup
+        logger.info("Using browser-based Google search")
 
         # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
@@ -920,7 +922,7 @@ def serve() -> FastMCP:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
             clear_task_context()
-            return f"Error: {e}"
+            return _error_response(str(e))
 
         # Mark task as running
         await task_store.update_status(task_id, TaskStatus.RUNNING)
@@ -943,7 +945,10 @@ def serve() -> FastMCP:
             await ctx.info(f"Generated {len(search_queries)} search queries")
 
             # Step 2: Open a browser session for all searches
+            # t5: Acquire concurrency semaphore for browser pool access
+            await _web_tools_semaphore.acquire()
             from browser_use.browser.session import BrowserSession
+            from bs4 import BeautifulSoup
 
             await task_store.update_progress(task_id, 1, total_steps, "Opening browser...")
             browser_session = BrowserSession(browser_profile=profile)
@@ -1062,6 +1067,8 @@ def serve() -> FastMCP:
 
             finally:
                 await browser_session.stop()
+                _web_tools_semaphore.release()
+                _web_tools_semaphore.release()
 
         except asyncio.CancelledError:
             await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
@@ -1079,7 +1086,6 @@ def serve() -> FastMCP:
     async def web_fetch(
         url: str,
         output_format: str = "html",
-        wait_for_selector: str | None = None,
         ctx: Context = CurrentContext(),
         progress: Progress = Progress(),
     ) -> str:
@@ -1094,23 +1100,21 @@ def serve() -> FastMCP:
         Args:
             url: The URL to fetch
             output_format: Output format (html, text, or screenshot) (default: html)
-            wait_for_selector: Optional CSS selector to wait for (for dynamic content)
 
         Returns:
             Page content as HTML, plain text, or base64-encoded screenshot
         """
         # t5: Concurrency control for web_fetch
-        async with _web_tools_semaphore:
-            pass
+        await _web_tools_semaphore.acquire()
 
-            # --- Task Tracking Setup ---
+        # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
         task_store = get_task_store()
         task_record = TaskRecord(
             task_id=task_id,
             tool_name="web_fetch",
             status=TaskStatus.PENDING,
-            input_params={"url": url, "output_format": output_format, "wait_for_selector": wait_for_selector},
+            input_params={"url": url, "output_format": output_format},
         )
         await task_store.create_task(task_record)
         bind_task_context(task_id, "web_fetch")
@@ -1127,7 +1131,7 @@ def serve() -> FastMCP:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
             clear_task_context()
-            return f"Error: {e}"
+            return _error_response(str(e))
 
         # Mark task as running
         await task_store.update_status(task_id, TaskStatus.RUNNING)
@@ -1140,7 +1144,7 @@ def serve() -> FastMCP:
             logger.error(error)
             await task_store.update_status(task_id, TaskStatus.FAILED, error=error)
             clear_task_context()
-            return f"Error: {error}"
+            return _error_response(error)
 
         # Validate output format
         valid_formats = ["html", "text", "screenshot"]
@@ -1149,7 +1153,7 @@ def serve() -> FastMCP:
             logger.error(error)
             await task_store.update_status(task_id, TaskStatus.FAILED, error=error)
             clear_task_context()
-            return f"Error: {error}"
+            return _error_response(error)
 
         # Start browser session
         from browser_use.browser.session import BrowserSession
@@ -1173,12 +1177,9 @@ def serve() -> FastMCP:
             await browser_session.navigate_to(url)
 
             # Wait a moment for page to render (with randomized delay)
-            import asyncio as _asyncio
-            import random
-
             render_delay = random.uniform(1.0, 3.0)
             logger.debug(f"Random render delay for web_fetch: {render_delay:.2f}s")
-            await _asyncio.sleep(render_delay)
+            await asyncio.sleep(render_delay)
 
             await ctx.info(f"Extracting content as {output_format}...")
 
@@ -1232,8 +1233,6 @@ def serve() -> FastMCP:
     # Define tool functions
     async def _health_check_impl() -> str:
         """Implementation of health check."""
-        import json
-
         import psutil
 
         task_store = get_task_store()
@@ -1267,8 +1266,6 @@ def serve() -> FastMCP:
 
     async def _task_list_impl(limit: int = 20, status_filter: str | None = None) -> str:
         """Implementation of task list."""
-        import json
-
         task_store = get_task_store()
 
         status = None
@@ -1276,7 +1273,7 @@ def serve() -> FastMCP:
             try:
                 status = TaskStatus(status_filter)
             except ValueError:
-                return f"Error: Invalid status '{status_filter}'. Use: running, paused, completed, failed, pending"
+                return _error_response(f"Invalid status '{status_filter}'. Use: running, paused, completed, failed, pending")
 
         tasks = await task_store.get_task_history(limit=limit, status=status)
 
@@ -1306,8 +1303,6 @@ def serve() -> FastMCP:
 
     async def _task_get_impl(task_id: str) -> str:
         """Implementation of task get."""
-        import json
-
         task_store = get_task_store()
 
         # Try exact match first, then prefix match
@@ -1321,7 +1316,7 @@ def serve() -> FastMCP:
                     break
 
         if not task:
-            return f"Error: Task '{task_id}' not found"
+            return _error_response(f"Task '{task_id}' not found")
 
         return json.dumps(
             {
@@ -1396,8 +1391,6 @@ def serve() -> FastMCP:
 
     async def _task_cancel_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """Implementation of task cancellation."""
-        import json
-
         task_store = get_task_store()
         actor = _normalize_operator(operator)
 
@@ -1432,8 +1425,6 @@ def serve() -> FastMCP:
 
     async def _task_pause_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """Implementation of cooperative task pause."""
-        import json
-
         task_store = get_task_store()
         matched_id = _match_running_task_id(task_id)
         if not matched_id:
@@ -1469,8 +1460,6 @@ def serve() -> FastMCP:
 
     async def _task_resume_impl(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """Implementation of cooperative task resume."""
-        import json
-
         task_store = get_task_store()
         matched_id = _match_running_task_id(task_id)
         if not matched_id:
@@ -1515,37 +1504,39 @@ def serve() -> FastMCP:
         return await _task_cancel_impl(task_id, operator=operator, note=note)
 
     @server.tool()
-    async def task_pause(task_id: str) -> str:
+    async def task_pause(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """
         Pause a running browser task at the next safe checkpoint.
 
         Args:
             task_id: Task ID (full or prefix match)
+            operator: Name of the operator pausing the task
+            note: Optional note about why the task is paused
 
         Returns:
             JSON with success status and message
         """
-        return await _task_pause_impl(task_id)
+        return await _task_pause_impl(task_id, operator=operator, note=note)
 
     @server.tool()
-    async def task_resume(task_id: str) -> str:
+    async def task_resume(task_id: str, operator: str | None = None, note: str | None = None) -> str:
         """
         Resume a paused browser task.
 
         Args:
             task_id: Task ID (full or prefix match)
+            operator: Name of the operator resuming the task
+            note: Optional note about why the task is resumed
 
         Returns:
             JSON with success status and message
         """
-        return await _task_resume_impl(task_id)
+        return await _task_resume_impl(task_id, operator=operator, note=note)
 
     # --- Web Viewer UI ---
     @server.custom_route(path="/", methods=["GET"])
     async def serve_viewer(request):
         """Serve the web viewer UI for task monitoring."""
-        from starlette.responses import FileResponse
-
         # Get the path to the viewer.html file
         viewer_path = Path(__file__).parent / "ui" / "viewer.html"
 
@@ -1563,8 +1554,6 @@ def serve() -> FastMCP:
     @server.custom_route(path="/dashboard", methods=["GET"])
     async def serve_dashboard(request):
         """Serve the dashboard UI for task/skill management."""
-        from starlette.responses import FileResponse
-
         dashboard_path = Path(__file__).parent / "ui" / "dashboard.html"
 
         if not dashboard_path.exists():
@@ -1582,20 +1571,12 @@ def serve() -> FastMCP:
     @server.custom_route(path="/api/health", methods=["GET"])
     async def api_health(request):
         """REST endpoint for health check."""
-        import json
-
-        from starlette.responses import JSONResponse
-
         result = await _health_check_impl()
         return JSONResponse(json.loads(result))
 
     @server.custom_route(path="/api/tasks", methods=["GET"])
     async def api_tasks(request):
         """REST endpoint for task list."""
-        import json
-
-        from starlette.responses import JSONResponse
-
         limit = int(request.query_params.get("limit", "20"))
         status_filter = request.query_params.get("status", None)
 
@@ -1605,10 +1586,6 @@ def serve() -> FastMCP:
     @server.custom_route(path="/api/tasks/{task_id}", methods=["GET"])
     async def api_task_get(request):
         """REST endpoint for task details."""
-        import json
-
-        from starlette.responses import JSONResponse
-
         task_id = request.path_params["task_id"]
         result = await _task_get_impl(task_id)
 
@@ -1621,10 +1598,6 @@ def serve() -> FastMCP:
     @server.custom_route(path="/api/tasks/{task_id}/pause", methods=["POST"])
     async def api_task_pause(request):
         """REST endpoint to pause a running task."""
-        import json
-
-        from starlette.responses import JSONResponse
-
         task_id = request.path_params["task_id"]
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         operator = payload.get("operator") if isinstance(payload, dict) else None
@@ -1637,10 +1610,6 @@ def serve() -> FastMCP:
     @server.custom_route(path="/api/tasks/{task_id}/resume", methods=["POST"])
     async def api_task_resume(request):
         """REST endpoint to resume a paused task."""
-        import json
-
-        from starlette.responses import JSONResponse
-
         task_id = request.path_params["task_id"]
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         operator = payload.get("operator") if isinstance(payload, dict) else None
@@ -1660,9 +1629,6 @@ def serve() -> FastMCP:
     @server.custom_route(path="/api/skills", methods=["GET"])
     async def api_skills(request):
         """REST endpoint for skills list."""
-
-        from starlette.responses import JSONResponse
-
         store = _get_skill_store()
         if not store:
             return JSONResponse({"error": "Skills feature is disabled"}, status_code=503)
@@ -1692,9 +1658,6 @@ def serve() -> FastMCP:
     @server.custom_route(path="/api/skills/{name}", methods=["GET"])
     async def api_skill_get(request):
         """REST endpoint for skill details."""
-
-        from starlette.responses import JSONResponse
-
         store = _get_skill_store()
         if not store:
             return JSONResponse({"error": "Skills feature is disabled"}, status_code=503)
@@ -1716,8 +1679,6 @@ def serve() -> FastMCP:
     @server.custom_route(path="/api/skills/{name}", methods=["DELETE"])
     async def api_skill_delete(request):
         """REST endpoint for skill deletion."""
-        from starlette.responses import JSONResponse
-
         store = _get_skill_store()
         if not store:
             return JSONResponse({"error": "Skills feature is disabled"}, status_code=503)
@@ -1748,8 +1709,6 @@ def serve() -> FastMCP:
             "message": "Skill execution started"
         }
         """
-        from starlette.responses import JSONResponse
-
         if not settings.skills.enabled:
             return JSONResponse({"error": "Skills feature is disabled"}, status_code=503)
 
@@ -1874,8 +1833,6 @@ def serve() -> FastMCP:
             "message": "Learning session started"
         }
         """
-        from starlette.responses import JSONResponse
-
         if not settings.skills.enabled:
             return JSONResponse({"error": "Skills feature is disabled"}, status_code=503)
 
@@ -2028,8 +1985,6 @@ def serve() -> FastMCP:
         Returns:
             StreamingResponse with text/event-stream content type
         """
-        import json
-
         from starlette.responses import StreamingResponse
 
         task_store = get_task_store()
@@ -2103,8 +2058,6 @@ def serve() -> FastMCP:
         Returns:
             StreamingResponse with text/event-stream content type
         """
-        import json
-
         from starlette.responses import StreamingResponse
 
         task_id = request.path_params["task_id"]
@@ -2121,8 +2074,6 @@ def serve() -> FastMCP:
                     break
 
         if not task:
-            from starlette.responses import JSONResponse
-
             return JSONResponse({"error": f"Task '{task_id}' not found"}, status_code=404)
 
         full_task_id = task.task_id
@@ -2231,7 +2182,7 @@ STDIO_DEPRECATION_MESSAGE = """
 ║       "mcpServers": {                                                        ║
 ║         "browser-use": {                                                     ║
 ║           "type": "streamable-http",                                         ║
-║           "url": "http://localhost:8000/mcp"                                 ║
+║           "url": "http://localhost:8383/mcp"                                 ║
 ║         }                                                                    ║
 ║       }                                                                      ║
 ║     }                                                                        ║
@@ -2241,7 +2192,7 @@ STDIO_DEPRECATION_MESSAGE = """
 ║       "mcpServers": {                                                        ║
 ║         "browser-use": {                                                     ║
 ║           "command": "npx",                                                  ║
-║           "args": ["mcp-remote", "http://localhost:8000/mcp"]                ║
+║           "args": ["mcp-remote", "http://localhost:8383/mcp"]                ║
 ║         }                                                                    ║
 ║       }                                                                      ║
 ║     }                                                                        ║
