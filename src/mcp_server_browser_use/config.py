@@ -285,6 +285,18 @@ class ToolsSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MCP_TOOLS_")
 
     web_search_timeout: int = Field(default=120, description="Timeout for web_search in seconds")
+    web_fetch_timeout: int = Field(default=30, description="Timeout for web_fetch navigation in seconds")
+
+
+class SearchEngineSettings(BaseSettings):
+    """Search engine configuration for web_search tool."""
+
+    model_config = SettingsConfigDict(env_prefix="MCP_SEARCH_")
+
+    default_engine: str = Field(default="google", description="Default search engine (google, bing, baidu)")
+    enabled_engines: list[str] = Field(default=["google", "bing", "baidu"], description="Enabled search engines")
+    bing_timeout: int = Field(default=30, description="Timeout for Bing search in seconds")
+    baidu_timeout: int = Field(default=30, description="Timeout for Baidu search in seconds")
 
 
 class SkillsSettings(BaseSettings):
@@ -325,6 +337,7 @@ class AppSettings(BaseSettings):
     skills: SkillsSettings = Field(default_factory=SkillsSettings)
     tools: ToolsSettings = Field(default_factory=ToolsSettings)
     stealth: StealthSettings = Field(default_factory=StealthSettings)
+    search: SearchEngineSettings = Field(default_factory=SearchEngineSettings)
 
     def save(self) -> Path:
         """Save current configuration to file (excluding secrets)."""

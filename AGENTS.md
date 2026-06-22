@@ -33,7 +33,7 @@ uv run pytest              # Run tests
 | `├─ observability/` | Task tracking (SQLite persistence) |
 | `├─ research/` | Deep research workflow |
 | `└─ skills/` | Machine-learned browser skills |
-| `src/mcp_server_browser_utils/` | Web search utilities (Google HTML parser, query generator) — **fork-specific** |
+| `src/mcp_server_browser_utils/` | Web search utilities (Google/Bing/Baidu HTML parsers, query generator) — **fork-specific** |
 | `tests/` | Pytest test suite |
 | `├─ integration_tests/` | End-to-end integration tests (real LLM + real browser) |
 | `scripts/` | Operational scripts |
@@ -48,8 +48,8 @@ uv run pytest              # Run tests
 |------|---------|----------|
 | `run_browser_agent` | Execute browser automation | 60-120s |
 | `run_deep_research` | Multi-search research | 2-5 min |
-| `web_search` | Google search via browser | 30-90s |
-| `web_fetch` | Fetch page content (JS-rendered) | 10-30s |
+| `web_search` | Multi-engine search (Google/Bing/Baidu) with retry & health-check | 30-90s |
+| `web_fetch` | Fetch page content (JS-rendered), timeout-protected | 10-30s |
 | `skill_list/get/delete` | Skill management | <1s |
 | `health_check` | Server status | <1s |
 | `task_list/get/cancel` | Task management | <1s |
