@@ -153,6 +153,9 @@ def server(
         start_new_session=True,
         cwd=os.getcwd(),
         env=os.environ.copy(),
+        # DETACHED_PROCESS on Windows: prevent subprocess from being killed
+        # when the parent SSH session / console is closed
+        **({"creationflags": subprocess.DETACHED_PROCESS} if os.name == "nt" and hasattr(subprocess, "DETACHED_PROCESS") else {}),
     )
 
     console.print("[bold green]Started HTTP MCP server (background)[/bold green]")
