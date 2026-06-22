@@ -4,7 +4,7 @@ MCP server that gives AI assistants the power to control a web browser.
 
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-> **Note**: This is an **internal fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use). The fork is hosted at [`github.com/captain99999999/mcp-browser-use`](https://github.com/captain99999999/mcp-browser-use) and is the **only** push target. For fork-specific changes (Handover Lock, `web_search` / `web_fetch`, deployment), see [.github/copilot-instructions.md](.github/copilot-instructions.md).
+> **Note**: This is an **internal fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use). The fork is hosted at [`github.com/captain99999999/mcp-browser-use`](https://github.com/captain99999999/mcp-browser-use) and is the **only** push target. For fork-specific changes (Handover Lock, multi-engine `web_search` / `web_fetch`, deployment), see [.github/copilot-instructions.md](.github/copilot-instructions.md).
 
 ---
 
@@ -150,6 +150,13 @@ mcp-server-browser-use config set -k agent.max_steps -v 30
 | `skills.enabled` | `false` | Enable skills system (beta - disabled by default) |
 | `skills.directory` | `~/.config/browser-skills` | Skills storage location |
 | `skills.validate_results` | `true` | Validate skill execution results |
+| `tools.web_search_timeout` | `120` | Timeout in seconds for web_search (env: `MCP_TOOLS_WEB_SEARCH_TIMEOUT`) |
+| `tools.web_fetch_timeout` | `30` | Timeout in seconds for web_fetch navigation (env: `MCP_TOOLS_WEB_FETCH_TIMEOUT`) |
+| `search.default_engine` | `google` | Default search engine: `google`, `bing`, `baidu` (env: `MCP_SEARCH_DEFAULT_ENGINE`) |
+| `search.enabled_engines` | `["google","bing","baidu"]` | Enabled search engines (env: `MCP_SEARCH_ENABLED_ENGINES`) |
+| `stealth.enabled` | `true` | Enable anti-detection for web tools (env: `MCP_STEALTH_ENABLED`) |
+| `stealth.random_delay_min` | `1.5` | Min random delay between searches in seconds (env: `MCP_STEALTH_RANDOM_DELAY_MIN`) |
+| `stealth.random_delay_max` | `3.5` | Max random delay between searches in seconds (env: `MCP_STEALTH_RANDOM_DELAY_MAX`) |
 
 ### Config Priority
 
@@ -242,8 +249,8 @@ These tools are exposed via MCP for AI clients:
 |------|-------------|------------------|
 | `run_browser_agent` | Execute browser automation tasks | 60-120s |
 | `run_deep_research` | Multi-search research with synthesis | 2-5 min |
-| `web_search` | Google search via browser + LLM query optimization | 10-30s |
-| `web_fetch` | Fetch web page content with JS rendering (HTML/text/screenshot) | 5-15s |
+| `web_search` | Multi-engine search (Google/Bing/Baidu) via browser + LLM query optimization, with retry & timeout | 30-90s |
+| `web_fetch` | Fetch web page content with JS rendering (HTML/text/screenshot), timeout-protected | 10-30s |
 | `skill_list` | List learned skills | <1s |
 | `skill_get` | Get skill definition | <1s |
 | `skill_delete` | Delete a skill | <1s |
@@ -290,20 +297,29 @@ The agent searches multiple sources, extracts key findings, and compiles a markd
 
 ### web_search
 
-Search the web using Google and browser-based HTML parsing, with LLM-optimized queries.
+Search the web using multiple search engines (Google, Bing, Baidu) with browser-based HTML parsing and LLM-optimized queries.
+
+**Features:**
+- Multi-engine support: `google` (default), `bing`, `baidu`
+- Exponential backoff retry (up to 3 attempts per query)
+- Timeout budget calculation accounting for stealth delays
+- Browser pool health-check on startup with unreachable URL filtering
+- Concurrency-safe semaphore with asyncio.Lock-protected round-robin
 
 ```bash
 mcp-server-browser-use call web_search \
   query="Python asyncio tutorial" \
   max_results=5 \
-  max_queries=1
+  max_queries=1 \
+  engine="google"
 ```
 
 **How it works:**
-1. LLM generates optimized search queries from the input topic
-2. Browser navigates to Google search results for each query
-3. BeautifulSoup4 parses titles, URLs, and snippets
-4. Results are deduplicated and returned as JSON
+1. LLM generates optimized search queries from the input topic (with retry)
+2. Engine-specific search URL is built from the selected engine config
+3. Browser navigates to the search results page for each query (timeout-protected)
+4. Engine-specific HTML parser extracts titles, URLs, and snippets
+5. Results are deduplicated and returned as JSON
 
 **Parameters:**
 
@@ -312,6 +328,8 @@ mcp-server-browser-use call web_search \
 | `query` | string | Search query or question (required) |
 | `max_results` | int | Maximum number of results to return (default 10) |
 | `max_queries` | int | Number of search queries to generate via LLM (default 3) |
+| `engine` | string | Search engine: `google`, `bing`, or `baidu` (default: `google`) |
+| `language` | string | Language code for search results, `auto` to let engine decide (default: `auto`) |
 
 **Returns:**
 ```json

@@ -149,7 +149,7 @@ class TestListTools:
 
     @pytest.mark.anyio
     async def test_web_search_tool_schema(self, client: Client):
-        """web_search tool should have query, max_results, max_queries params."""
+        """web_search tool should have query, max_results, max_queries, engine, language params."""
         tools = await client.list_tools()
         tool = next(t for t in tools if t.name == "web_search")
 
@@ -158,6 +158,8 @@ class TestListTools:
         assert "query" in schema_str
         assert "max_results" in schema_str
         assert "max_queries" in schema_str
+        assert "engine" in schema_str
+        assert "language" in schema_str
 
     @pytest.mark.anyio
     async def test_web_fetch_tool_schema(self, client: Client):
@@ -305,3 +307,44 @@ class TestRunDeepResearch:
             # Should use settings.research.max_searches (default 5)
             call_kwargs = machine_class.call_args[1]
             assert call_kwargs["max_searches"] >= 1  # At least 1 search
+
+
+class TestSearchEngineConfig:
+    """Test SearchEngineSettings configuration."""
+
+    def test_default_values(self):
+        """SearchEngineSettings should have correct defaults."""
+        from mcp_server_browser_use.config import SearchEngineSettings
+
+        settings = SearchEngineSettings()
+        assert settings.default_engine == "google"
+        assert settings.enabled_engines == ["google", "bing", "baidu"]
+        assert settings.bing_timeout == 30
+        assert settings.baidu_timeout == 30
+
+    def test_env_var_mapping(self, monkeypatch):
+        """SearchEngineSettings should map MCP_SEARCH_* env vars correctly."""
+        monkeypatch.setenv("MCP_SEARCH_DEFAULT_ENGINE", "bing")
+        monkeypatch.setenv("MCP_SEARCH_ENABLED_ENGINES", '["google","bing"]')
+        monkeypatch.setenv("MCP_SEARCH_BING_TIMEOUT", "45")
+        monkeypatch.setenv("MCP_SEARCH_BAIDU_TIMEOUT", "60")
+
+        import importlib
+
+        import mcp_server_browser_use.config
+
+        importlib.reload(mcp_server_browser_use.config)
+
+        settings = mcp_server_browser_use.config.SearchEngineSettings()
+        assert settings.default_engine == "bing"
+        assert settings.enabled_engines == ["google", "bing"]
+        assert settings.bing_timeout == 45
+        assert settings.baidu_timeout == 60
+
+    def test_appsettings_includes_search(self):
+        """AppSettings should include search field."""
+        from mcp_server_browser_use.config import AppSettings
+
+        settings = AppSettings()
+        assert hasattr(settings, "search")
+        assert settings.search.default_engine == "google"

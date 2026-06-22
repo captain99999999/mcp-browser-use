@@ -9,9 +9,11 @@ import re
 import sys
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import httpx
 from starlette.responses import FileResponse, JSONResponse
 
 
@@ -65,10 +67,13 @@ _configure_stdio_logging()
 # Initialized later in serve() after settings are loaded
 _web_tools_semaphore: asyncio.Semaphore | None = None
 _browser_pool_index = 0
+_browser_pool_lock = asyncio.Lock()
+# Track unreachable CDP URLs (populated by health check in serve())
+_unreachable_cdp_urls: set[str] = set()
 
 
-def _get_browser_pool_url() -> str | None:
-    """Get next CDP URL from pool using round-robin.
+async def _get_browser_pool_url() -> str | None:
+    """Get next CDP URL from pool using round-robin, skipping unreachable URLs.
 
     Returns:
         Next CDP URL or None if no URLs configured.
@@ -77,9 +82,19 @@ def _get_browser_pool_url() -> str | None:
     urls = settings.browser.get_cdps_url_or_urls()
     if not urls:
         return None
-    url = urls[_browser_pool_index % len(urls)]
-    _browser_pool_index += 1
-    return url
+
+    async with _browser_pool_lock:
+        # Try each URL; skip unreachable ones
+        for _ in range(len(urls)):
+            url = urls[_browser_pool_index % len(urls)]
+            _browser_pool_index += 1
+            if url not in _unreachable_cdp_urls:
+                return url
+
+        # All URLs are unreachable — warn and return the last one anyway
+        url = urls[_browser_pool_index % len(urls)]
+        logger.warning(f"All CDP URLs are unreachable, falling back to: {url}")
+        return url
 
 
 # ruff: noqa: E402 - Intentional late imports after logging configuration
@@ -98,9 +113,10 @@ from mcp_server_browser_use.anti_detect.stealth import (
 
 # Web search utilities
 from mcp_server_browser_utils.search import (
-    SearchResult,
+    SEARCH_ENGINES,
     deduplicate_results,
     generate_search_queries,
+    get_search_engine_config,
 )
 
 from .config import settings
@@ -190,6 +206,85 @@ async def _wait_if_paused(task_id: str, task_store, message: str = "Paused by us
     await task_store.update_progress(task_id, 0, 0, message, TaskStage.NAVIGATING)
 
 
+async def _retry_with_backoff(
+    coro_factory: Callable[[], Awaitable[Any]] | Awaitable[Any],
+    max_retries: int = 2,
+    base_delay: float = 2.0,
+    *,
+    _logger: logging.Logger = logger,
+) -> tuple[bool, Any, Exception | None]:
+    """Execute an async operation with exponential backoff retry.
+
+    Args:
+        coro_factory: Async callable (or factory returning an awaitable) to retry
+        max_retries: Maximum number of retries (total attempts = max_retries + 1)
+        base_delay: Base delay in seconds before first retry
+        _logger: Logger to use for retry messages
+
+    Returns:
+        (success: bool, result: Any, last_error: Exception | None)
+    """
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            # Support both callable factories and raw coroutines
+            if callable(coro_factory):
+                result = await coro_factory()
+            else:
+                result = await coro_factory
+            return True, result, None
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                delay = base_delay * (2**attempt)
+                _logger.warning(f"Attempt {attempt + 1}/{max_retries + 1} failed: {e}. Retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+            else:
+                _logger.error(f"All {max_retries + 1} attempts failed: {e}")
+    return False, None, last_error
+
+
+async def _check_cdp_health(cdp_url: str, timeout: float = 5.0) -> bool:
+    """Check if a CDP URL is reachable via its /json/version endpoint.
+
+    Args:
+        cdp_url: CDP base URL (e.g., http://127.0.0.1:9222)
+        timeout: Request timeout in seconds
+
+    Returns:
+        True if the CDP endpoint responds correctly.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{cdp_url}/json/version")
+            if resp.status_code == 200:
+                data = resp.json()
+                if "Browser" in data:
+                    logger.info(f"CDP health OK: {cdp_url} -> {data.get('Browser', 'unknown')}")
+                    return True
+            logger.warning(f"CDP health check failed for {cdp_url}: status={resp.status_code}")
+            return False
+    except Exception as e:
+        logger.warning(f"CDP health check unreachable: {cdp_url} ({e})")
+        return False
+
+
+def _check_cdp_health_sync(cdp_url: str, timeout: float = 5.0) -> bool:
+    """Synchronous version of CDP health check for use in serve()."""
+    try:
+        resp = httpx.get(f"{cdp_url}/json/version", timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "Browser" in data:
+                logger.info(f"CDP health OK: {cdp_url} -> {data.get('Browser', 'unknown')}")
+                return True
+        logger.warning(f"CDP health check failed for {cdp_url}: status={resp.status_code}")
+        return False
+    except Exception as e:
+        logger.warning(f"CDP health check unreachable: {cdp_url} ({e})")
+        return False
+
+
 def serve() -> FastMCP:
     """Create and configure MCP server with background task support."""
     # Set up structured logging first
@@ -200,6 +295,16 @@ def serve() -> FastMCP:
     # Initialize web tools semaphore (t5: concurrency control for web_search/web_fetch)
     global _web_tools_semaphore
     _web_tools_semaphore = asyncio.Semaphore(min(settings.server.max_concurrent_tasks, 5))
+
+    # t6: Health-check CDP pool URLs on startup
+    urls = settings.browser.get_cdps_url_or_urls()
+    if urls:
+        logger.info(f"Checking health of {len(urls)} CDP URL(s)...")
+        for url in urls:
+            if not _check_cdp_health_sync(url):
+                _unreachable_cdp_urls.add(url)
+        reachable = len(urls) - len(_unreachable_cdp_urls)
+        logger.info(f"CDP health check complete: {reachable}/{len(urls)} reachable")
 
     # Initialize skill components (only when skills feature is enabled)
     skill_store: SkillStore | None = None
@@ -233,7 +338,7 @@ def serve() -> FastMCP:
             logger.info(f"Using external browser via CDP: {settings.browser.cdp_url}")
         return llm, profile
 
-    def _get_llm_and_profile_for_web_tools():
+    async def _get_llm_and_profile_for_web_tools():
         """t3: Helper with browser pool support for web_search/web_fetch.
 
         Includes stealth anti-detection features when enabled in settings.
@@ -255,7 +360,7 @@ def serve() -> FastMCP:
             proxy = ProxySettings(server=settings.browser.proxy_server, bypass=settings.browser.proxy_bypass)
 
         # t3: Get next browser URL from pool
-        cdp_url = _get_browser_pool_url() or settings.browser.cdp_url
+        cdp_url = await _get_browser_pool_url() or settings.browser.cdp_url
 
         # Stealth: Add anti-detection Chrome arguments
         args_list = []
@@ -876,14 +981,18 @@ def serve() -> FastMCP:
         query: str,
         max_results: int = 10,
         max_queries: int = 3,
+        engine: str = "google",
+        language: str = "auto",
         ctx: Context = CurrentContext(),
         progress: Progress = Progress(),
     ) -> str:
         """
-        Search the web using Google and browser-based HTML parsing.
+        Search the web using multiple search engines with browser-based HTML parsing.
 
-        Uses LLM to generate optimized search queries, then navigates Google
-        search results pages via browser to extract titles, URLs, and snippets.
+        Uses LLM to generate optimized search queries, then navigates search
+        result pages via browser to extract titles, URLs, and snippets.
+
+        Supports Google, Bing, and Baidu search engines.
 
         t3/t4/t5: Applies browser pool round-robin, timeout control, and concurrency limit.
 
@@ -891,13 +1000,28 @@ def serve() -> FastMCP:
             query: Search query or question
             max_results: Maximum number of results to return (default 10)
             max_queries: Number of search queries to generate (default 3)
+            engine: Search engine to use (google, bing, baidu) (default: google)
+            language: Language code for search results (default: auto)
 
         Returns:
             JSON array of search results with title, url, and snippet
         """
         from urllib.parse import quote_plus
 
-        logger.info("Using browser-based Google search")
+        # Validate and resolve engine
+        engine_config = get_search_engine_config(engine)
+        if engine_config is None:
+            available = ", ".join(SEARCH_ENGINES.keys())
+            error = f"Unsupported search engine: '{engine}'. Available engines: {available}"
+            logger.error(error)
+            return _error_response(error)
+
+        if engine not in settings.search.enabled_engines:
+            error = f"Search engine '{engine}' is not enabled. Enabled engines: {settings.search.enabled_engines}"
+            logger.error(error)
+            return _error_response(error)
+
+        logger.info(f"Using browser-based search with engine: {engine}")
 
         # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
@@ -906,18 +1030,18 @@ def serve() -> FastMCP:
             task_id=task_id,
             tool_name="web_search",
             status=TaskStatus.PENDING,
-            input_params={"query": query, "max_results": max_results, "max_queries": max_queries},
+            input_params={"query": query, "max_results": max_results, "max_queries": max_queries, "engine": engine, "language": language},
         )
         await task_store.create_task(task_record)
         bind_task_context(task_id, "web_search")
         task_logger = get_task_logger()
 
-        await ctx.info(f"Starting web search: {query}")
-        logger.info(f"Starting web search: {query[:100]}...")
-        task_logger.info("task_created", query_preview=query[:100])
+        await ctx.info(f"Starting web search ({engine}): {query}")
+        logger.info(f"Starting web search ({engine}): {query[:100]}...")
+        task_logger.info("task_created", query_preview=query[:100], engine=engine)
 
         try:
-            llm, profile = _get_llm_and_profile_for_web_tools()
+            llm, profile = await _get_llm_and_profile_for_web_tools()
         except LLMProviderError as e:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
@@ -929,42 +1053,45 @@ def serve() -> FastMCP:
         task_logger.info("task_running")
 
         try:
-            # Step 1: Generate search queries using LLM
+            # Step 1: Generate search queries using LLM (with retry)
             total_steps = max_queries + 2
             await progress.set_total(total_steps)
             await ctx.info("Generating optimized search queries...")
             logger.info(f"Generating {max_queries} search queries for: {query}")
 
-            try:
-                search_queries = await generate_search_queries(query, llm, max_queries)
-            except Exception as e:
-                logger.error(f"Failed to generate search queries: {e}")
+            success, search_queries, _gen_err = await _retry_with_backoff(
+                lambda: generate_search_queries(query, llm, max_queries),
+                max_retries=1,
+                base_delay=1.0,
+            )
+            if not success:
+                logger.error(f"Failed to generate search queries: {_gen_err}")
                 search_queries = [query]
 
             await progress.increment()
             await ctx.info(f"Generated {len(search_queries)} search queries")
 
             # Step 2: Open a browser session for all searches
-            # t5: Acquire concurrency semaphore for browser pool access
-            await _web_tools_semaphore.acquire()
             from browser_use.browser.session import BrowserSession
             from bs4 import BeautifulSoup
 
-            await task_store.update_progress(task_id, 1, total_steps, "Opening browser...")
-            browser_session = BrowserSession(browser_profile=profile)
-            await browser_session.start()
-
-            # Anti-detection: Inject stealth scripts if enabled
-            if settings.stealth.enabled:
-                try:
-                    await inject_stealth_scripts(browser_session)
-                    logger.debug("Stealth scripts injected for web_search")
-                except Exception as stealth_err:
-                    logger.warning(f"Failed to inject stealth scripts for web_search: {stealth_err}")
-
             all_results = []
+            browser_session = None
 
             try:
+                # t5: Acquire concurrency semaphore for browser pool access
+                await _web_tools_semaphore.acquire()
+                await task_store.update_progress(task_id, 1, total_steps, "Opening browser...")
+                browser_session = BrowserSession(browser_profile=profile)
+                await browser_session.start()
+
+                # Anti-detection: Inject stealth scripts if enabled
+                if settings.stealth.enabled:
+                    try:
+                        await inject_stealth_scripts(browser_session)
+                        logger.debug("Stealth scripts injected for web_search")
+                    except Exception as stealth_err:
+                        logger.warning(f"Failed to inject stealth scripts for web_search: {stealth_err}")
                 for i, search_query in enumerate(search_queries, 1):
                     # Anti-detection: Add random delay between searches
                     if i > 1:  # Don't delay before the first search
@@ -980,70 +1107,56 @@ def serve() -> FastMCP:
                             logger.debug(f"Mouse movement failed for search {i}: {mouse_err}")
 
                     await ctx.info(f"Searching ({i}/{len(search_queries)}): {search_query}")
-                    logger.info(f"Executing Google search {i}/{len(search_queries)}: {search_query}")
+                    logger.info(f"Executing {engine} search {i}/{len(search_queries)}: {search_query}")
 
-                    try:
-                        # t3: t4: Navigate with timeout
-                        google_url = f"https://www.google.com/search?q={quote_plus(search_query)}&hl=en"
-                        timeout_seconds = settings.tools.web_search_timeout / max_queries
-                        await asyncio.wait_for(browser_session.navigate_to(google_url), timeout=timeout_seconds)
-                        await asyncio.wait_for(asyncio.sleep(1.5), timeout=5)
+                    # Build search URL using engine config
+                    lang_code = language if language != "auto" else "en"
+                    search_url = engine_config.search_url_template.format(query=quote_plus(search_query), language=lang_code)
 
-                        # t4: Get page content with timeout
-                        page = await browser_session.get_current_page()
-                        html = await asyncio.wait_for(page.evaluate("() => document.documentElement.outerHTML"), timeout=timeout_seconds)
+                    # t4: Calculate effective timeout with overhead budget
+                    estimated_overhead = (max_queries - 1) * ((settings.stealth.random_delay_min + settings.stealth.random_delay_max) / 2) + 3.0
+                    effective_timeout = max(10, (settings.tools.web_search_timeout - estimated_overhead) / max_queries)
+                    logger.debug(f"Search timeout: {effective_timeout:.1f}s (total budget: {settings.tools.web_search_timeout}s)")
 
-                        # Parse results: find h3 titles, then walk up to extract URL + snippet
-                        soup = BeautifulSoup(html, "html.parser")
-                        result_count = 0
+                    # B5: Search with retry
+                    search_success = False
+                    for retry_attempt in range(3):
+                        try:
+                            await asyncio.wait_for(browser_session.navigate_to(search_url), timeout=effective_timeout)
+                            await asyncio.sleep(1.5)
 
-                        for h3 in soup.select("h3"):
-                            if len(all_results) >= max_results:
-                                break
-                            title = h3.get_text(strip=True)
-                            if not title:
-                                continue
+                            # t4: Get page content with timeout
+                            page = await browser_session.get_current_page()
+                            html = await asyncio.wait_for(page.evaluate("() => document.documentElement.outerHTML"), timeout=effective_timeout)
 
-                            # Find URL: walk up parent chain for an <a> with href
-                            url = ""
-                            parent = h3.parent
-                            for _ in range(10):
-                                if parent is None:
+                            # Parse results using engine-specific parser
+                            soup = BeautifulSoup(html, "html.parser")
+                            engine_results = engine_config.result_parser(soup, html) if engine_config.result_parser else []
+
+                            result_count = 0
+                            for r in engine_results:
+                                if len(all_results) >= max_results:
                                     break
-                                link = parent.select_one("a[href]")
-                                if link:
-                                    href = link.get("href", "")
-                                    if "/url?q=" in href:
-                                        url = href.split("/url?q=")[-1].split("&")[0]
-                                    elif href.startswith("http"):
-                                        url = href
-                                    if url:
-                                        break
-                                parent = parent.parent
-
-                            # Find snippet: walk up for a div with enough text
-                            snippet = ""
-                            parent = h3.parent
-                            for _ in range(8):
-                                if parent is None:
-                                    break
-                                for div in parent.select("div"):
-                                    text = div.get_text(strip=True)
-                                    if text and len(text) > 30 and text != title:
-                                        snippet = text[:500]
-                                        break
-                                if snippet:
-                                    break
-                                parent = parent.parent
-
-                            if title and url:
-                                all_results.append(SearchResult(title=title[:200], url=url, snippet=snippet))
+                                all_results.append(r)
                                 result_count += 1
 
-                        logger.info(f"Search '{search_query[:30]}...' parsed {result_count} results")
+                            logger.info(f"Search '{search_query[:30]}...' parsed {result_count} results")
+                            search_success = True
+                            break  # Exit retry loop on success
 
-                    except Exception as e:
-                        logger.error(f"Search failed for query '{search_query[:30]}...': {e}")
+                        except TimeoutError:
+                            logger.warning(f"Search timeout for '{search_query[:30]}...' (attempt {retry_attempt + 1}/3)")
+                            if retry_attempt < 2:
+                                delay = 2.0 * (2**retry_attempt)
+                                await asyncio.sleep(delay)
+                        except Exception as e:
+                            logger.error(f"Search failed for '{search_query[:30]}...' (attempt {retry_attempt + 1}/3): {e}")
+                            if retry_attempt < 2:
+                                delay = 2.0 * (2**retry_attempt)
+                                await asyncio.sleep(delay)
+
+                    if not search_success:
+                        logger.warning(f"Skipping query after 3 failed attempts: {search_query[:30]}...")
 
                     await progress.increment()
 
@@ -1066,8 +1179,8 @@ def serve() -> FastMCP:
                 return result_json
 
             finally:
-                await browser_session.stop()
-                _web_tools_semaphore.release()
+                if browser_session is not None:
+                    await browser_session.stop()
                 _web_tools_semaphore.release()
 
         except asyncio.CancelledError:
@@ -1104,9 +1217,6 @@ def serve() -> FastMCP:
         Returns:
             Page content as HTML, plain text, or base64-encoded screenshot
         """
-        # t5: Concurrency control for web_fetch
-        await _web_tools_semaphore.acquire()
-
         # --- Task Tracking Setup ---
         task_id = str(uuid.uuid4())
         task_store = get_task_store()
@@ -1126,7 +1236,7 @@ def serve() -> FastMCP:
 
         try:
             # t3: Use browser pool profile
-            _llm, profile = _get_llm_and_profile_for_web_tools()
+            _llm, profile = await _get_llm_and_profile_for_web_tools()
         except LLMProviderError as e:
             logger.error(f"LLM initialization failed: {e}")
             await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
@@ -1155,78 +1265,86 @@ def serve() -> FastMCP:
             clear_task_context()
             return _error_response(error)
 
-        # Start browser session
-        from browser_use.browser.session import BrowserSession
+        # t5: Concurrency control for web_fetch — acquire AFTER validation
+        # to avoid holding the semaphore during early-return errors
+        await _web_tools_semaphore.acquire()
 
-        await task_store.update_progress(task_id, 1, 2, "Loading page...")
-
-        browser_session = BrowserSession(browser_profile=profile)
-        await browser_session.start()
-
-        # Anti-detection: Inject stealth scripts if enabled
-        if settings.stealth.enabled:
-            try:
-                await inject_stealth_scripts(browser_session)
-                logger.debug("Stealth scripts injected for web_fetch")
-            except Exception as stealth_err:
-                logger.warning(f"Failed to inject stealth scripts for web_fetch: {stealth_err}")
+        browser_session = None
 
         try:
-            # Navigate to page
-            await ctx.info(f"Navigating to: {url[:80]}...")
-            await browser_session.navigate_to(url)
+            # Start browser session
+            from browser_use.browser.session import BrowserSession
 
-            # Wait a moment for page to render (with randomized delay)
-            render_delay = random.uniform(1.0, 3.0)
-            logger.debug(f"Random render delay for web_fetch: {render_delay:.2f}s")
-            await asyncio.sleep(render_delay)
+            await task_store.update_progress(task_id, 1, 2, "Loading page...")
 
-            await ctx.info(f"Extracting content as {output_format}...")
+            browser_session = BrowserSession(browser_profile=profile)
+            await browser_session.start()
 
-            if output_format == "html":
-                page = await browser_session.get_current_page()
-                content = await page.evaluate("() => document.documentElement.outerHTML")
-            elif output_format == "text":
-                page = await browser_session.get_current_page()
-                content = await page.evaluate("() => document.body.innerText")
-            elif output_format == "screenshot":
-                content = await browser_session.take_screenshot()
-            else:
-                # This should not happen due to validation above
-                raise ValueError(f"Invalid output_format: {output_format}")
+            # Anti-detection: Inject stealth scripts if enabled
+            if settings.stealth.enabled:
+                try:
+                    await inject_stealth_scripts(browser_session)
+                    logger.debug("Stealth scripts injected for web_fetch")
+                except Exception as stealth_err:
+                    logger.warning(f"Failed to inject stealth scripts for web_fetch: {stealth_err}")
 
-            # Truncate content if too long
-            MAX_CONTENT_SIZE = 100000
-            if len(content) > MAX_CONTENT_SIZE:
-                truncated_content = content[:MAX_CONTENT_SIZE]
-                truncated_content += "\n\n... (content truncated due to size limit)"
-                await ctx.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
-                logger.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
-                content = truncated_content
+            try:
+                # Navigate to page with timeout (t4)
+                await ctx.info(f"Navigating to: {url[:80]}...")
+                await asyncio.wait_for(browser_session.navigate_to(url), timeout=settings.tools.web_fetch_timeout)
 
-            await progress.increment()
-            await ctx.info("Fetch completed")
-            logger.info(f"Web fetch completed: {len(content)} characters ({output_format})")
+                # Wait a moment for page to render (with randomized delay)
+                render_delay = random.uniform(1.0, 3.0)
+                logger.debug(f"Random render delay for web_fetch: {render_delay:.2f}s")
+                await asyncio.sleep(render_delay)
 
-            # Mark task as completed
-            await task_store.update_status(task_id, TaskStatus.COMPLETED, result=content[:500])
-            task_logger.info("task_completed", content_length=len(content), format=output_format)
-            clear_task_context()
-            return content
+                await ctx.info(f"Extracting content as {output_format}...")
 
-        except asyncio.CancelledError:
-            await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
-            task_logger.info("task_cancelled")
-            clear_task_context()
-            raise
-        except Exception as e:
-            await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
-            task_logger.error("task_failed", error=str(e))
-            clear_task_context()
-            logger.error(f"Web fetch failed: {e}")
-            raise
+                if output_format == "html":
+                    page = await browser_session.get_current_page()
+                    content = await page.evaluate("() => document.documentElement.outerHTML")
+                elif output_format == "text":
+                    page = await browser_session.get_current_page()
+                    content = await page.evaluate("() => document.body.innerText")
+                else:  # screenshot (already validated)
+                    content = await browser_session.take_screenshot()
+
+                # Truncate content if too long
+                MAX_CONTENT_SIZE = 100000
+                if len(content) > MAX_CONTENT_SIZE:
+                    truncated_content = content[:MAX_CONTENT_SIZE]
+                    truncated_content += "\n\n... (content truncated due to size limit)"
+                    await ctx.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
+                    logger.info(f"Content truncated from {len(content)} to {MAX_CONTENT_SIZE} characters")
+                    content = truncated_content
+
+                await progress.increment()
+                await ctx.info("Fetch completed")
+                logger.info(f"Web fetch completed: {len(content)} characters ({output_format})")
+
+                # Mark task as completed
+                await task_store.update_status(task_id, TaskStatus.COMPLETED, result=content[:500])
+                task_logger.info("task_completed", content_length=len(content), format=output_format)
+                clear_task_context()
+                return content
+
+            except asyncio.CancelledError:
+                await task_store.update_status(task_id, TaskStatus.CANCELLED, error="Cancelled by user")
+                task_logger.info("task_cancelled")
+                clear_task_context()
+                raise
+            except Exception as e:
+                await task_store.update_status(task_id, TaskStatus.FAILED, error=str(e))
+                task_logger.error("task_failed", error=str(e))
+                clear_task_context()
+                logger.error(f"Web fetch failed: {e}")
+                raise
+            finally:
+                if browser_session is not None:
+                    await browser_session.stop()
+
         finally:
-            await browser_session.stop()
+            _web_tools_semaphore.release()
 
     # --- Observability Tools ---
 

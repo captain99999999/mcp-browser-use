@@ -8,7 +8,7 @@
 This is an **internal fork** of [Saik0s/mcp-browser-use](https://github.com/Saik0s/mcp-browser-use) — an MCP server that wraps [browser-use](https://github.com/browser-use/browser-use) for AI-driven browser automation. The fork adds:
 
 - **Handover Lock** — task pause/resume for multi-operator collaboration (`task_pause`, `task_resume` tools)
-- **`web_search` / `web_fetch` tools** — Google-based search and JS-rendered page fetch
+- **`web_search` / `web_fetch` tools** — Multi-engine search (Google/Bing/Baidu) with retry, timeout, and browser-pool health-check; JS-rendered page fetch with timeout protection
 
 The fork is hosted at `github.com/captain99999999/mcp-browser-use`. **Do not push to the upstream `Saik0s` repository.**
 
@@ -35,7 +35,7 @@ src/
 │   ├── observability/             # SQLite task tracking
 │   ├── skills/                    # machine-learned browser skills
 │   └── research/                  # deep research workflow
-└── mcp_server_browser_utils/      # fork-specific: Google HTML parser + query generator
+└── mcp_server_browser_utils/      # fork-specific: multi-engine search (Google/Bing/Baidu) parsers + LLM query generator
 tests/                             # pytest (unit + integration_tests/)
 scripts/                           # operational scripts
 ├── debug/                         # ad-hoc diagnostic scripts (never in project root)
